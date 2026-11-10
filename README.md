@@ -16,7 +16,8 @@ All art is generated from code. There are no asset files and no sound yet.
 
 | | Player 1 (keyboard + mouse) | 2nd keyboard player | Controller (up to 4 players) |
 |---|---|---|---|
-| Join | Always in | Press an arrow key | Press A or Start |
+| Join | Always in | Press Enter | Press A or Start |
+| Leave | Can't leave | Hold Backspace for 1 second | Hold Start for 1 second |
 | Move | WASD | Arrow keys | Left stick |
 | Aim | Mouse (else move direction) | Move direction, with auto-aim | Right stick (else move direction, with auto-aim) |
 | Shoot | Left mouse or Space | `.` | Right trigger or RB |
@@ -47,6 +48,8 @@ the screen and the controls you need at the bottom. Press **Tab** (or **Back** o
    opens its eyes, and you hold the platform for 12 seconds. Then it **blinks** into the mines.
 
 Players who join after the class step get a role automatically.
+A player who leaves drops the heartstone and any ore they carry, and their player number is free
+for the next person to join. A controller that disconnects takes its player out of the game.
 
 ## The run: a branching map
 
@@ -71,7 +74,8 @@ Difficulty, monster health and loot rarity rise with every floor.
 - **Where loot comes from:** supply crates in cave rooms, better caches inside hidden pockets,
   and drops from crawlers (ore often, guns sometimes).
 - **On the floor:** guns float with a beam in their rarity colour; press Interact to pick one up.
-  Ore, torches and medkits are picked up by walking over them.
+  Ore, torches and medkits are picked up by walking over them. A medkit at full health, or
+  torches when you already carry 12, stay on the floor for someone else.
 - **Backpack:** one gun in hand plus 2 spare. Picking up a gun when the pack is full drops your current one.
 - **The lift stash:** ore you carry is stored when you step onto the lift. If you go down
   before that, you drop the ore you were carrying, and a teammate can grab it.
@@ -97,7 +101,8 @@ Hidden pockets stay hidden (drawn as solid rock) until you dig into one.
 7. **Blink.** The lift jumps to the next depth: a new random mine, a bit harder.
 
 When a player's health hits 0 they are downed; a teammate holds Interact next to them to revive.
-If everyone is down, the run ends; press Interact to dive again.
+If everyone is down, the run ends; press Interact to dive again. The tutorial only plays the
+first time: a new run starts straight in the mines, and everyone keeps their role.
 
 ## What to judge in playtests (Phase 1 gate)
 
@@ -113,6 +118,9 @@ If everyone is down, the run ends; press Interact to dive again.
 |---|---|
 | Player speed, carry slowdown, fire rate, health | `scripts/player.gd` (top) |
 | Crawler speed, sight range, attack | `scripts/crawler.gd` (top) |
+| How fast crawlers can get on deep floors | `scripts/crawler.gd`: `MAX_DEPTH_SPEED` (kept just under player speed) |
+| How dark the mines are | `scripts/game.gd`: `MINE_AMBIENT` (lower is darker) |
+| Threat added per shot | `scripts/loot.gd`: `threat_per_shot` (fast guns add less per shot) |
 | Charge time, leash distance, torch light radius | `scripts/game.gd` (top) |
 | Gun stats, rarity odds, upgrade costs | `scripts/loot.gd` |
 | Threat rate, swarm sizes | `scripts/game.gd`, `_update_state` and `emit_noise` |
@@ -138,7 +146,13 @@ Run the automated play-through (no window). It plays the whole prologue (move, p
 gate opens, chop the trail, wake and clear the critters, find the heartstone, feed the tower,
 first jump), then loot (crates, pickups, swapping, the stash and stations), then a mine floor
 (sealed shard room, dig in, kill a crawler, wake one with noise, carry and feed the shard, vote on
-a path), a Mini-boss floor, a Vault floor, beating the depth boss, then revive, game over and restart:
+a path), a Mini-boss floor, a Vault floor, beating the depth boss, then revive, game over and restart.
+It also guards the playtest fixes: swapping class tents can't stack bonuses, a medkit is not used
+up at full health, a hole dug in hard rock is wide enough to walk through, a new floor never takes
+torches away, a shot at the boss's flank hits, bystanders don't slow a revive, a player can leave
+and the slot is reused, and a restart goes straight to the mines with the same roles. Three
+balance guards: a Common Rifle one-shots a floor-1 crawler, the SMG does not flood the threat
+meter, and crawlers never get faster than the players:
 
 ```bash
 godot --headless --path . -- --autotest

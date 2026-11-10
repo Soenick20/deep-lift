@@ -11,7 +11,7 @@ const TYPES := {
 	"Pistol":  {"dmg": 1.0, "cd": 0.26, "pellets": 1, "spread": 0.04, "life": 0.75, "speed": 20.0, "noise": 8.0, "pierce": 0},
 	"Shotgun": {"dmg": 0.8, "cd": 0.62, "pellets": 5, "spread": 0.42, "life": 0.36, "speed": 18.0, "noise": 11.0, "pierce": 0},
 	"SMG":     {"dmg": 0.5, "cd": 0.085, "pellets": 1, "spread": 0.16, "life": 0.6, "speed": 22.0, "noise": 9.0, "pierce": 0},
-	"Rifle":   {"dmg": 2.6, "cd": 0.75, "pellets": 1, "spread": 0.0, "life": 1.1, "speed": 30.0, "noise": 12.0, "pierce": 2}}
+	"Rifle":   {"dmg": 3.4, "cd": 0.75, "pellets": 1, "spread": 0.0, "life": 1.1, "speed": 30.0, "noise": 12.0, "pierce": 2}}
 
 const UPGRADE_COST := [6, 12]   # Common -> Rare, Rare -> Epic, paid in banked ore
 
@@ -46,6 +46,15 @@ static func color_of(w: Dictionary) -> Color:
 
 static func dps(w: Dictionary) -> float:
 	return w.dmg * w.pellets / w.cd
+
+
+# How much one shot adds to the threat meter. Guns that fire faster than the pistol add less
+# per shot, so holding the trigger costs about the same threat per second whatever you carry.
+# (Before this, an SMG filled the meter in about 13 seconds of firing.)
+const THREAT_PER_NOISE := 0.07
+const THREAT_REF_CD := 0.26     # the pistol's pace
+static func threat_per_shot(w: Dictionary) -> float:
+	return w.get("noise", 9.0) * THREAT_PER_NOISE * minf(1.0, w.get("cd", THREAT_REF_CD) / THREAT_REF_CD)
 
 
 # Rarity odds get better with depth; bonus shifts odds further (hidden pockets, tough monsters).

@@ -20,6 +20,9 @@ const LEASH := 13.0
 const LIFT_RADIUS := 2.15
 const TORCH_LIGHT_RADIUS := 4.0
 const MAX_TORCHES := 40
+# How much light the mines have with no lamp, torch or ore nearby. It was 0.8, brighter than the
+# prologue's dark woods (0.24), so torches did little for seeing. Lower = darker.
+const MINE_AMBIENT := 0.35
 const CLASSES := ["Bodyguard", "Architect", "Artificer"]
 
 var level
@@ -97,6 +100,8 @@ var env: Environment
 var mode := "mine"
 var prologue = null
 var skip_tutorial := false
+var tutorial_done := false       # set once the crew has reached the mines; later runs start there
+var _joy_wait_release := {}      # joypad id -> true: must let go of A/Start before it can join again
 var _skip_prev := false
 var autotest := false
 var shot_dir := ""
@@ -138,7 +143,7 @@ func _setup_world() -> void:
 	env.background_color = Color("050507")
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color("6a7590")
-	env.ambient_light_energy = 0.8
+	env.ambient_light_energy = MINE_AMBIENT
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	var we := WorldEnvironment.new()
 	we.environment = env
@@ -356,7 +361,11 @@ func _build_shard() -> void:
 
 func _add_player(dev: String, joy: int):
 	var p = PlayerScript.new()
-	var i := players.size()
+	# take the lowest free player number, so a slot freed by someone leaving is reused
+	var taken: Array = players.map(func(o): return o.index)
+	var i := 0
+	while i in taken:
+		i += 1
 	add_child(p)
 	p.setup(self, PlayerInput.make(dev, joy), i, PLAYER_COLORS[i])
 	var base := lift_pos
@@ -365,9 +374,30 @@ func _add_player(dev: String, joy: int):
 	p.position = base + Vector3((i % 2) * 0.9 - 0.45, 0, (i / 2) * 0.9 - 0.45)
 	p.position.y = ground_y(p.position)
 	players.append(p)
+	players.sort_custom(func(a, b): return a.index < b.index)
+	_refresh_player_labels()
 	if mode == "mine" or (prologue and prologue.step > PrologueScript.CLASS):
 		p.set_class(CLASSES[i % 3])
 	return p
+
+
+# A player drops out: they hand over what they carry and their slot is free again.
+func _remove_player(p, why: String) -> void:
+	if p.carrying:
+		drop_shard(p)
+	if p.ore > 0:
+		drop_ore(p.global_position, p.ore)
+	if p.input.device == "joy":
+		_joy_wait_release[p.input.joy_id] = true
+	players.erase(p)
+	p.queue_free()
+	_refresh_player_labels()
+	show_message("P%d %s." % [p.index + 1, why], 1.5)
+
+
+func _refresh_player_labels() -> void:
+	for i in players.size():
+		player_labels[i].add_theme_color_override("default_color", PLAYER_COLORS[players[i].index].lightened(0.35))
 
 
 # ------------------------------------------------------------------ run / floor flow
@@ -376,7 +406,9 @@ func start_run() -> void:
 	run_seed = randi()
 	bank_ore = 0
 	loot_rng.seed = run_seed + 17
+	var roles: Array = []
 	for p in players:
+		roles.append(p.cls)
 		p.hp = PlayerScript.MAX_HP
 		p.torches = 5
 		p.ore = 0
@@ -385,7 +417,11 @@ func start_run() -> void:
 	act = 1
 	run_map = RunMap.new()
 	map_panel.run_map = run_map
-	if skip_tutorial:
+	if skip_tutorial or tutorial_done:
+		# once the crew has seen the tutorial, a new run starts in the mines with the same roles
+		for i in players.size():
+			if roles[i] != "":
+				players[i].set_class(roles[i])
 		run_map.generate(loot_rng)
 		start_floor(1)
 		show_message("The old lift wakes in the dark.\nFind the heartshard and bring it home.", 4.0)
@@ -464,12 +500,13 @@ func start_floor(d: int, ftype: String = "mine") -> void:
 	if run_map.layers.is_empty():
 		run_map.generate(loot_rng)
 	mode = "mine"
+	tutorial_done = true
 	if prologue:
 		prologue.cleanup()
 		prologue = null
 	env.background_color = Color("050507")
 	env.ambient_light_color = Color("6a7590")
-	env.ambient_light_energy = 0.8
+	env.ambient_light_energy = MINE_AMBIENT
 	_clear_floor_objects()
 	for i in players.size():
 		if players[i].cls == "":
@@ -509,7 +546,7 @@ func start_floor(d: int, ftype: String = "mine") -> void:
 		p.carrying = false
 		p.downed = false
 		p.hp = mini(p.hp + 2, PlayerScript.MAX_HP) if p.hp > 0 else 3
-		p.torches = mini(p.torches + 2, 8)
+		p.torches = maxi(p.torches, mini(p.torches + 2, 8))   # top up to 8, never take torches away
 		var a := TAU * i / maxf(players.size(), 1) + 0.6
 		p.position = lift_pos + Vector3(cos(a), 0, sin(a)) * 0.9
 		p.position.y = ground_y(p.position)
@@ -559,6 +596,7 @@ func _input(event: InputEvent) -> void:
 func _process(delta: float) -> void:
 	delta = minf(delta, 0.05)
 	_check_joins()
+	_check_leaves(delta)
 	_update_mouse()
 	var skip_now := Input.is_physical_key_pressed(KEY_TAB)
 	for id in Input.get_connected_joypads():
@@ -812,12 +850,13 @@ func _torch_mesh() -> ArrayMesh:
 	return _torch_mesh_cache
 
 
-func emit_noise(pos: Vector3, radius: float) -> void:
+# threat_add: how much this noise adds to the threat meter; left out, it follows the radius.
+func emit_noise(pos: Vector3, radius: float, threat_add: float = -1.0) -> void:
 	for c in crawlers:
 		if is_instance_valid(c) and c.is_alive() and c.global_position.distance_to(pos) < radius:
 			c.hear(pos)
 	if state == EXPLORE and mode == "mine":
-		threat = minf(100.0, threat + radius * 0.07)
+		threat = minf(100.0, threat + (threat_add if threat_add >= 0.0 else radius * Loot.THREAT_PER_NOISE))
 	var now := Time.get_ticks_msec()
 	if radius >= 5.0 and now - _last_ring_ms > 350:
 		_last_ring_ms = now
@@ -836,7 +875,7 @@ func spawn_bullet(origin: Vector3, dir: Vector3, owner, life: float = 0.75, w: D
 	mi.global_position = origin
 	bullets.append({"node": mi, "dir": dir, "life": life, "dmg": w.get("dmg", 1.0), "speed": w.get("speed", 20.0), "pierce": w.get("pierce", 0), "hit": []})
 	if noisy:
-		emit_noise(owner.global_position, w.get("noise", 9.0))
+		emit_noise(owner.global_position, w.get("noise", 9.0), Loot.threat_per_shot(w))
 
 
 func _update_bullets(delta: float) -> void:
@@ -851,7 +890,7 @@ func _update_bullets(delta: float) -> void:
 				hit = true
 				break
 			for c in crawlers:
-				if is_instance_valid(c) and c.is_alive() and not (c in b.hit) and _flat_dist(np, c.global_position) < 0.42:
+				if is_instance_valid(c) and c.is_alive() and not (c in b.hit) and _flat_dist(np, c.global_position) < c.hit_radius:
 					c.hit(b.dmg, b.dir)
 					if b.pierce > 0:
 						b.pierce -= 1
@@ -998,15 +1037,41 @@ func _check_joins() -> void:
 			used_joys.append(p.input.joy_id)
 	if not used_kb2 and PlayerInput.kb2_join_pressed() and not autotest and shot_dir == "":
 		var p = _add_player("kb2", -1)
-		show_message("P%d joined (arrow keys)!" % (p.index + 1), 1.5)
+		show_message("P%d joined (2nd keyboard)! Hold Backspace to leave." % (p.index + 1), 2.0)
 		return
 	for id in Input.get_connected_joypads():
 		if id in used_joys:
 			continue
+		if _joy_wait_release.has(id):
+			# this pad just left: it must let go of A/Start before it can join again
+			if not PlayerInput.joy_join_pressed(id):
+				_joy_wait_release.erase(id)
+			continue
 		if PlayerInput.joy_join_pressed(id):
 			var p = _add_player("joy", id)
-			show_message("P%d joined (controller)!" % (p.index + 1), 1.5)
+			show_message("P%d joined (controller)! Hold Start to leave." % (p.index + 1), 2.0)
 			return
+
+
+# Players 2-4 can drop out by holding their leave button for a second, and a controller that
+# disconnects takes its player with it. Otherwise an idle player holds the others on the leash,
+# and blocks the class gate and the path vote.
+func _check_leaves(delta: float) -> void:
+	var connected := Input.get_connected_joypads()
+	for p in players.duplicate():
+		var inp = p.input
+		if inp.scripted or inp.device == "kbm":
+			continue
+		if inp.device == "joy" and not (inp.joy_id in connected):
+			_remove_player(p, "left (controller disconnected)")
+			continue
+		if not inp.leave_held:
+			p.leave_armed = true
+			p.leave_t = 0.0
+		elif p.leave_armed:
+			p.leave_t += delta
+			if p.leave_t >= 1.0:
+				_remove_player(p, "left the crew")
 
 
 func _update_mouse() -> void:
@@ -1108,7 +1173,7 @@ func _update_hud(delta: float) -> void:
 			var w: Dictionary = p.weapon
 			var gun_txt := "[color=#%s]%s[/color]" % [Loot.color_of(w).to_html(false), Loot.name_of(w)]
 			var spare := ("  +%d" % p.pack.size()) if p.pack.size() > 0 else ""
-			l.text = "P%d %s  HP [%s]  %s%s  Torches %d  Ore %d%s" % [i + 1, role, bar, gun_txt, spare, p.torches, p.ore, status]
+			l.text = "P%d %s  HP [%s]  %s%s  Torches %d  Ore %d%s" % [p.index + 1, role, bar, gun_txt, spare, p.torches, p.ore, status]
 		else:
 			l.text = ""
 	var joinable := players.size() < 4
@@ -1122,7 +1187,7 @@ func _update_hud(delta: float) -> void:
 	else:
 		hint_label.text = "P1: WASD move, mouse aim, LMB shoot, RMB dig, E interact, Q torch, R swap gun   |   Controller: sticks, RT shoot, LT dig, A interact, Y torch, B swap"
 		if joinable:
-			hint_label.text += "\nMore players: press A on a controller, or arrow keys for a 2nd keyboard player ( . shoot  , dig  / interact  M torch  N swap )"
+			hint_label.text += "\nMore players: press A on a controller, or Enter for a 2nd keyboard player ( arrows move  . shoot  , dig  / interact  M torch  N swap )"
 
 
 # ------------------------------------------------------------------ autotest (headless)
@@ -1174,6 +1239,26 @@ func _dig_cells_on_route(a: Vector2i, b: Vector2i) -> void:
 				level.dig(c + d)
 
 
+# A hard-rock cell on the outside of the shard room's ring, with open floor in front of it and
+# diggable rock on both sides. Returns [rock cell, floor cell], or [] if this floor has none.
+func _find_hard_face() -> Array:
+	var sc: Vector2i = level.shard_cell
+	var sr: float = level.shard_room.r
+	for y in range(sc.y - int(sr) - 5, sc.y + int(sr) + 6):
+		for x in range(sc.x - int(sr) - 5, sc.x + int(sr) + 6):
+			var c := Vector2i(x, y)
+			if level.cell_at(c) != LevelScript.HARD:
+				continue
+			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var n: Vector2i = c - d
+				var side := Vector2i(d.y, d.x)
+				if not level.is_floor(n) or Vector2(n).distance_to(Vector2(sc)) <= sr + 2.6:
+					continue
+				if level.can_dig(c + side) and level.can_dig(c - side):
+					return [c, n]
+	return []
+
+
 func _run_autotest() -> void:
 	await _frames(3)
 	var p1 = players[0]
@@ -1197,6 +1282,16 @@ func _run_autotest() -> void:
 	for i in 2:
 		players[i].position = level.surface.tents[i].door
 		player_interact(players[i])
+	# swapping tents must not stack bonuses
+	var base_torches: int = p2.torches
+	p2.set_class("Artificer")
+	p2.set_class("Artificer")
+	if p2.torches != base_torches + 4:
+		return _fail("picking Artificer twice gave %d torches, expected %d" % [p2.torches, base_torches + 4])
+	p2.set_class("Bodyguard")
+	p2.set_class("Architect")
+	if p2.torches != base_torches or p2.weapon.type != "Pistol":
+		return _fail("switching roles kept the old role's gear (%d torches, %s)" % [p2.torches, p2.weapon.type])
 	await _frames(3)
 	if p1.cls != "Bodyguard" or p2.cls != "Architect" or p1.gun != "shotgun" or p2.dig_mul < 2.0:
 		return _fail("classes not applied (%s, %s)" % [p1.cls, p2.cls])
@@ -1304,6 +1399,15 @@ func _run_autotest() -> void:
 	player_interact(p1)
 	if p1.hp != PlayerScript.MAX_HP:
 		return _fail("med bay heal failed")
+	# a medkit stays on the floor at full health, and is used once someone is hurt
+	_spawn_pickup("medkit", p1.position, 2)
+	await _frames(3)
+	if pickups.size() != 1:
+		return _fail("a medkit was used up at full health")
+	p1.hp = 2
+	await _frames(3)
+	if p1.hp != 4 or pickups.size() != 0:
+		return _fail("a hurt player did not pick up the medkit (hp %d)" % p1.hp)
 	var kc = _spawn_crawler(p1.global_position + Vector3(0, 0, -6.0), false)
 	kc.hit(999.0, Vector3.FORWARD)
 	print("loot ok: Epic %s, bank %d, pickups after kill %d" % [p1.weapon.type, bank_ore, pickups.size()])
@@ -1319,6 +1423,21 @@ func _run_autotest() -> void:
 	if level.nest_spots.size() < 3 or crawlers.size() < 3:
 		return _fail("expected sleeping crawlers, got %d" % crawlers.size())
 	print("floor ok: crawlers=%d rooms=%d" % [crawlers.size(), level.rooms.size()])
+
+	# balance guards
+	if Loot.make("Rifle", 0).dmg * 0.9 < crawlers[0].max_hp:
+		return _fail("even a low-roll Common Rifle should kill a floor-1 crawler in one shot")
+	var smg: Dictionary = Loot.make("SMG", 0)
+	var pistol: Dictionary = Loot.make("Pistol", 0)
+	if Loot.threat_per_shot(smg) / smg.cd > 1.5 * Loot.threat_per_shot(pistol) / pistol.cd:
+		return _fail("holding the SMG trigger adds far more threat per second than the pistol")
+	var real_depth := depth
+	depth = 40
+	var top_speed: float = crawlers[0].run_speed()
+	depth = real_depth
+	if top_speed >= PlayerScript.SPEED:
+		return _fail("deep crawlers outrun the players (%.2f m/s)" % top_speed)
+	print("balance ok: crawler top speed %.2f m/s" % top_speed)
 	_dig_route_to_shard()
 	if level.path_world(lift_pos, shard.global_position).size() == 0:
 		return _fail("no path after digging")
@@ -1340,6 +1459,36 @@ func _run_autotest() -> void:
 	if not killed:
 		return _fail("crawler did not die")
 	print("combat ok")
+
+	# digging hard rock by hand opens a hole two cells wide, so a player fits through.
+	# (This runs after the route above is dug, on a different part of the ring.)
+	var face: Array = _find_hard_face()
+	if face.is_empty():
+		print("hard rock dig: skipped (no suitable rock face on this floor)")
+	else:
+		var hc: Vector2i = face[0]
+		var hn: Vector2i = face[1]
+		var hside := Vector2i(hc.y - hn.y, hc.x - hn.x)
+		var back: Vector3 = p1.position
+		p1.position = level.cell_to_world(hn)
+		p1.facing = Vector3(hc.x - hn.x, 0, hc.y - hn.y)
+		p1.input.mouse_active = false
+		p1.input.dig = true
+		var td := Time.get_ticks_msec()
+		while level.cell_at(hc) == LevelScript.HARD and Time.get_ticks_msec() - td < 4000:
+			await get_tree().process_frame
+		p1.input.dig = false
+		if level.cell_at(hc) != LevelScript.FLOOR:
+			return _fail("holding dig did not break the hard rock")
+		if level.cell_at(hc + hside) != LevelScript.FLOOR and level.cell_at(hc - hside) != LevelScript.FLOOR:
+			return _fail("a hole dug in hard rock is one cell wide: a player can't fit through")
+		# the noise woke things up: clear them so the next steps start calm
+		for k in crawlers:
+			if is_instance_valid(k) and k.is_alive() and k.state != CrawlerScript.SLEEP:
+				k.hit(999.0, Vector3.FORWARD)
+		p1.position = back
+		await _frames(2)
+		print("hard rock dig ok")
 
 	# noise wakes sleepers
 	var sleeper = null
@@ -1387,8 +1536,11 @@ func _run_autotest() -> void:
 	print("blink ok: floor 2 (%s), crawlers=%d" % [floor_type, crawlers.size()])
 
 	# mini-boss floor: the shard is caged until the Brute dies
+	p1.torches = 11
 	start_floor(depth + 1, "miniboss")
 	await _frames(3)
+	if p1.torches < 11:
+		return _fail("starting a floor took torches away (%d left)" % p1.torches)
 	if boss_ref == null or boss_ref.kind != "brute" or not shard_locked:
 		return _fail("mini-boss floor has no Brute or the shard is not caged")
 	p1.position = shard.global_position + Vector3(0.4, 0, 0)
@@ -1424,6 +1576,14 @@ func _run_autotest() -> void:
 	await _frames(3)
 	if boss_ref == null or boss_ref.kind != "boss":
 		return _fail("boss floor has no boss")
+	# a shot along the boss's flank (0.6 m off centre) must hit: its body is about 1.5 m wide
+	var boss_hp: float = boss_ref.hp
+	spawn_bullet(boss_ref.global_position + Vector3(0.6, 0.6, -2.0), Vector3(0, 0, 1), p1, 0.75, {}, false)
+	var tf := Time.get_ticks_msec()
+	while boss_ref.hp >= boss_hp and Time.get_ticks_msec() - tf < 1500:
+		await get_tree().process_frame
+	if boss_ref.hp >= boss_hp:
+		return _fail("a shot at the boss's flank passed straight through it")
 	boss_ref.hit(99999.0, Vector3.FORWARD)
 	await _frames(3)
 	for p in players:
@@ -1444,7 +1604,11 @@ func _run_autotest() -> void:
 		return _fail("beating the boss did not start the next depth")
 	print("boss ok: depth %d begins" % act)
 
-	# revive
+	# revive, with two bystanders: people standing around must not slow it down
+	var p3 = _add_player("kb2", -1)
+	p3.input.scripted = true
+	var p4 = _add_player("kb2", -1)
+	p4.input.scripted = true
 	p2.hurt(10)
 	await _frames(2)
 	if not p2.downed:
@@ -1459,6 +1623,17 @@ func _run_autotest() -> void:
 		return _fail("revive failed")
 	print("revive ok")
 
+	# leaving frees the slot, and the next player to join takes it
+	_remove_player(p3, "left the crew")
+	if players.size() != 3 or p3 in players:
+		return _fail("leaving did not remove the player")
+	await _frames(2)
+	var p5 = _add_player("kb2", -1)
+	p5.input.scripted = true
+	if p5.index != 2 or players[2] != p5 or p4.index != 3:
+		return _fail("a new player did not take the free slot (got P%d)" % (p5.index + 1))
+	print("leave + rejoin ok")
+
 	# game over and restart
 	for p in players:
 		p.invuln = 0.0
@@ -1470,8 +1645,10 @@ func _run_autotest() -> void:
 	p1.input.interact = true
 	await _frames(3)
 	p1.input.interact = false
-	if mode != "surface" or state != EXPLORE:
-		return _fail("restart failed")
+	if mode != "mine" or state != EXPLORE or depth != 1 or act != 1:
+		return _fail("restart should go straight back to the mines (mode %s, floor %d)" % [mode, depth])
+	if p1.cls != "Bodyguard" or p2.cls != "Architect":
+		return _fail("restart lost the crew's roles (%s, %s)" % [p1.cls, p2.cls])
 	print("game over + restart ok")
 	print("AUTOTEST PASS")
 	get_tree().quit(0)
@@ -2049,6 +2226,11 @@ func _update_loot(delta: float) -> void:
 		if pk.kind != "gun":
 			for p in players:
 				if p.downed or _flat_dist(p.global_position, pk.node.global_position) > 0.7:
+					continue
+				# leave it on the floor for someone who can use it
+				if pk.kind == "medkit" and p.hp >= PlayerScript.MAX_HP:
+					continue
+				if pk.kind == "torches" and p.torches >= 12:
 					continue
 				match pk.kind:
 					"ore":
