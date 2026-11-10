@@ -34,6 +34,24 @@ var surface := {}                      # named places for the prologue
 
 const DIRS4 := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
 
+# ---- cave rendering (mines): a 4x finer voxel grid over the gameplay cells
+const F := 4                  # fine voxels per cell side
+const FS := CELL / F          # 0.125 m
+const FW := W * F
+const CAVE_CHUNK := 8         # cells per cave chunk side
+const HMAX := 1.35            # tallest rock voxel
+const RISE := 1.2             # metres from the floor edge until the rock reaches HMAX
+const VOID := 1.55            # rock further than this from open floor is left as darkness
+const BIG := 9999.0
+var open_f := PackedByteArray()      # 1 = open floor (visible)
+var dwall := PackedFloat32Array()    # rock: distance to open floor (fine units)
+var dfloor := PackedFloat32Array()   # floor: distance to rock (fine units)
+var covered := {}                    # hidden pocket cells, drawn as rock until found
+var cave_noise := FastNoiseLite.new()
+var dirty_chunks := {}
+var crystal_nodes := {}              # ore cell -> crystal decor
+var last_uncovered := 0
+
 
 # ------------------------------------------------------------------ queries
 func idx(c: Vector2i) -> int:
@@ -68,11 +86,26 @@ func cell_to_world(c: Vector2i) -> Vector3:
 
 
 func is_solid_world(p: Vector3) -> bool:
+	if mode == "mine":
+		return not _open_fine_world(p.x, p.z)
 	return not is_floor(world_to_cell(p))
 
 
-# A square of half-size r around p must be entirely floor.
+func _open_fine_world(x: float, z: float) -> bool:
+	var fx := floori(x / FS)
+	var fz := floori(z / FS)
+	if fx < 0 or fz < 0 or fx >= FW or fz >= FW:
+		return false
+	return open_f[fz * FW + fx] == 1
+
+
+# A square of half-size r around p must be entirely open.
 func can_occupy(p: Vector3, r: float) -> bool:
+	if mode == "mine":
+		for o in [Vector2(-r, -r), Vector2(r, -r), Vector2(-r, r), Vector2(r, r), Vector2(0, 0)]:
+			if not _open_fine_world(p.x + o.x, p.z + o.y):
+				return false
+		return true
 	for o in [Vector2(-r, -r), Vector2(r, -r), Vector2(-r, r), Vector2(r, r)]:
 		if not is_floor(Vector2i(floori((p.x + o.x) / CELL), floori((p.z + o.y) / CELL))):
 			return false
@@ -119,7 +152,13 @@ func dig(c: Vector2i) -> int:
 		tree_nodes.erase(c)
 	if t == ORE:
 		_update_ore_lights(c)
-	_rebuild_chunks_near(c)
+		if crystal_nodes.has(c):
+			crystal_nodes[c].queue_free()
+			crystal_nodes.erase(c)
+	if mode == "mine":
+		_cave_after_dig(c)
+	else:
+		_rebuild_chunks_near(c)
 	return t
 
 
@@ -206,12 +245,21 @@ func generate(seed_value: int, depth_value: int) -> void:
 			p += Vector2.from_angle(ang)
 			_carve_disc(p, 1.3)
 	# hidden pockets you only find by digging
+	covered.clear()
 	for i in 4:
 		var c := Vector2i(rng.randi_range(8, W - 9), rng.randi_range(8, H - 9))
 		if cell_at(c) == DIRT and _far_from_floor(c, 4):
+			var before := grid.duplicate()
 			_carve_blob(c, rng.randf_range(2.0, 3.0))
+			for y in range(c.y - 7, c.y + 8):
+				for x in range(c.x - 7, c.x + 8):
+					var q := Vector2i(x, y)
+					if in_bounds(q) and before[idx(q)] != FLOOR and grid[idx(q)] == FLOOR:
+						covered[q] = true
 			for j in 6:
 				_ore_vein(c + Vector2i(rng.randi_range(-3, 3), rng.randi_range(-3, 3)), 3)
+
+	_erode_caves()
 
 	# seal the shard room behind a ring of hard rock
 	var sc: Vector2i = shard_room.c
@@ -242,8 +290,10 @@ func generate(seed_value: int, depth_value: int) -> void:
 		nest_spots.append(_floor_near(sc, sr - 1.5))
 
 	_build_astar()
+	_build_fine_all()
 	_build_all_chunks()
 	_place_ore_lights()
+	_place_cave_decor({})
 
 
 func _carve_disc(p: Vector2, r: float) -> void:
@@ -361,7 +411,7 @@ func _clear_decor() -> void:
 	surface.clear()
 
 
-func _place_ore_lights() -> void:
+func _place_ore_lights(only: Dictionary = {}) -> void:
 	var cands: Array = []
 	for y in H:
 		for x in W:
@@ -369,13 +419,13 @@ func _place_ore_lights() -> void:
 			if grid[idx(c)] != ORE:
 				continue
 			for d in DIRS4:
-				if is_floor(c + d):
+				if is_floor(c + d) and not covered.has(c + d) and (only.is_empty() or only.has(c + d)):
 					cands.append([c, d])
 					break
 	cands.shuffle()
 	var picked: Array = []
 	for e in cands:
-		if ore_lights.size() >= 34:
+		if ore_lights.size() >= 40:
 			break
 		var c: Vector2i = e[0]
 		var ok := true
@@ -783,6 +833,12 @@ func _build_all_chunks() -> void:
 	for k in chunk_nodes:
 		chunk_nodes[k].queue_free()
 	chunk_nodes.clear()
+	dirty_chunks.clear()
+	if mode == "mine":
+		for cy in ceili(float(H) / CAVE_CHUNK):
+			for cx in ceili(float(W) / CAVE_CHUNK):
+				_build_cave_chunk(Vector2i(cx, cy))
+		return
 	for cy in ceili(float(H) / CHUNK):
 		for cx in ceili(float(W) / CHUNK):
 			_build_chunk(Vector2i(cx, cy))
@@ -874,3 +930,406 @@ func _build_chunk(k: Vector2i) -> void:
 	mi.mesh = mesh
 	add_child(mi)
 	chunk_nodes[k] = mi
+
+
+# ================================================================== caves (mines)
+var ind := PackedByteArray()   # per cell: 1 = visible open floor
+
+
+func _erode_caves() -> void:
+	cave_noise.seed = rng.randi()
+	cave_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	cave_noise.frequency = 0.07
+	var en := FastNoiseLite.new()
+	en.seed = rng.randi()
+	en.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	en.frequency = 0.13
+	var near_pocket := {}
+	for c in covered:
+		for y in range(-3, 4):
+			for x in range(-3, 4):
+				near_pocket[c + Vector2i(x, y)] = true
+	# roughen tunnel walls into organic shapes
+	for it in 2:
+		var add: Array = []
+		for y in range(3, H - 3):
+			for x in range(3, W - 3):
+				var c := Vector2i(x, y)
+				if grid[idx(c)] != DIRT or near_pocket.has(c):
+					continue
+				var touch := false
+				for d in DIRS4:
+					if grid[idx(c + d)] == FLOOR and not covered.has(c + d):
+						touch = true
+						break
+				if touch and en.get_noise_2d(x, y) > (0.1 if it == 0 else 0.3):
+					add.append(c)
+		for c in add:
+			grid[idx(c)] = FLOOR
+	# rock pillars standing inside the wider chambers
+	var dist := {}
+	var q: Array[Vector2i] = []
+	for y in H:
+		for x in W:
+			var c := Vector2i(x, y)
+			if grid[idx(c)] != FLOOR:
+				dist[c] = 0
+				q.append(c)
+	var h := 0
+	while h < q.size():
+		var c := q[h]
+		h += 1
+		for d in DIRS4:
+			var n: Vector2i = c + d
+			if in_bounds(n) and not dist.has(n):
+				dist[n] = dist[c] + 1
+				q.append(n)
+	for y in H:
+		for x in W:
+			var c := Vector2i(x, y)
+			if dist.get(c, 0) >= 4 and en.get_noise_2d(x * 2.3 + 91.0, y * 2.3) < -0.42:
+				if Vector2(c).distance_to(Vector2(lift_cell)) > 12.0 and Vector2(c).distance_to(Vector2(shard_cell)) > float(shard_room.get("r", 5.0)) + 3.0:
+					grid[idx(c)] = DIRT
+
+
+func _ind_cell(c: Vector2i) -> int:
+	return 1 if grid[idx(c)] == FLOOR and not covered.has(c) else 0
+
+
+func _fine_open_calc(fx: int, fz: int) -> int:
+	var gx := (fx + 0.5) / F - 0.5
+	var gz := (fz + 0.5) / F - 0.5
+	var x0 := floori(gx)
+	var z0 := floori(gz)
+	var tx := gx - x0
+	var tz := gz - z0
+	tx = tx * tx * (3.0 - 2.0 * tx)
+	tz = tz * tz * (3.0 - 2.0 * tz)
+	if x0 < 0 or z0 < 0 or x0 >= W - 1 or z0 >= H - 1:
+		return 0
+	var i := z0 * W + x0
+	var a := ind[i]
+	var b := ind[i + 1]
+	var c := ind[i + W]
+	var d := ind[i + W + 1]
+	if a + b + c + d == 0:
+		return 0
+	var v := lerpf(lerpf(a, b, tx), lerpf(c, d, tx), tz)
+	return 1 if v > 0.5 + cave_noise.get_noise_2d(fx, fz) * 0.16 else 0
+
+
+func _recompute_open(fx0: int, fz0: int, fx1: int, fz1: int) -> void:
+	for fz in range(maxi(fz0, 0), mini(fz1, FW - 1) + 1):
+		for fx in range(maxi(fx0, 0), mini(fx1, FW - 1) + 1):
+			open_f[fz * FW + fx] = _fine_open_calc(fx, fz)
+
+
+func _chamfer(which: int, x0: int, z0: int, x1: int, z1: int) -> void:
+	var d: PackedFloat32Array = dwall if which == 0 else dfloor
+	x0 = maxi(x0, 1)
+	z0 = maxi(z0, 1)
+	x1 = mini(x1, FW - 2)
+	z1 = mini(z1, FW - 2)
+	for z in range(z0, z1 + 1):
+		var row := z * FW
+		for x in range(x0, x1 + 1):
+			var i := row + x
+			var v := d[i]
+			if v == 0.0:
+				continue
+			var w := d[i - 1] + 1.0
+			if w < v:
+				v = w
+			w = d[i - FW] + 1.0
+			if w < v:
+				v = w
+			w = d[i - FW - 1] + 1.4142
+			if w < v:
+				v = w
+			w = d[i - FW + 1] + 1.4142
+			if w < v:
+				v = w
+			d[i] = v
+	for z in range(z1, z0 - 1, -1):
+		var row := z * FW
+		for x in range(x1, x0 - 1, -1):
+			var i := row + x
+			var v := d[i]
+			if v == 0.0:
+				continue
+			var w := d[i + 1] + 1.0
+			if w < v:
+				v = w
+			w = d[i + FW] + 1.0
+			if w < v:
+				v = w
+			w = d[i + FW + 1] + 1.4142
+			if w < v:
+				v = w
+			w = d[i + FW - 1] + 1.4142
+			if w < v:
+				v = w
+			d[i] = v
+	if which == 0:
+		dwall = d
+	else:
+		dfloor = d
+
+
+func _build_fine_all() -> void:
+	ind.resize(W * H)
+	for y in H:
+		for x in W:
+			ind[y * W + x] = _ind_cell(Vector2i(x, y))
+	open_f.resize(FW * FW)
+	_recompute_open(0, 0, FW - 1, FW - 1)
+	dwall.resize(FW * FW)
+	dfloor.resize(FW * FW)
+	for i in FW * FW:
+		var o := open_f[i] == 1
+		dwall[i] = 0.0 if o else BIG
+		dfloor[i] = BIG if o else 0.0
+	_chamfer(0, 1, 1, FW - 2, FW - 2)
+	_chamfer(1, 1, 1, FW - 2, FW - 2)
+
+
+# After digging a cell: update the fine grid around it and queue the chunks to redraw.
+func _cave_after_dig(c: Vector2i) -> void:
+	var cells: Array = [c]
+	for d in DIRS4:
+		if covered.has(c + d):
+			cells.append_array(_uncover(c + d))
+	for q in cells:
+		ind[idx(q)] = _ind_cell(q)
+	var mn := Vector2i(W, H)
+	var mx := Vector2i(-1, -1)
+	for q in cells:
+		mn = Vector2i(mini(mn.x, q.x), mini(mn.y, q.y))
+		mx = Vector2i(maxi(mx.x, q.x), maxi(mx.y, q.y))
+	var f0 := (mn - Vector2i(1, 1)) * F
+	var f1 := (mx + Vector2i(2, 2)) * F
+	_recompute_open(f0.x, f0.y, f1.x, f1.y)
+	var m := int(VOID / FS) + 4
+	for fz in range(maxi(f0.y, 0), mini(f1.y, FW - 1) + 1):
+		for fx in range(maxi(f0.x, 0), mini(f1.x, FW - 1) + 1):
+			if open_f[fz * FW + fx] == 1:
+				dwall[fz * FW + fx] = 0.0
+	_chamfer(0, f0.x - m, f0.y - m, f1.x + m, f1.y + m)
+	var m2 := 8
+	for fz in range(maxi(f0.y - m2, 1), mini(f1.y + m2, FW - 2) + 1):
+		for fx in range(maxi(f0.x - m2, 1), mini(f1.x + m2, FW - 2) + 1):
+			dfloor[fz * FW + fx] = BIG if open_f[fz * FW + fx] == 1 else 0.0
+	_chamfer(1, f0.x - m2, f0.y - m2, f1.x + m2, f1.y + m2)
+	var k0 := Vector2i(floori(float(mn.x - 4) / CAVE_CHUNK), floori(float(mn.y - 4) / CAVE_CHUNK))
+	var k1 := Vector2i(floori(float(mx.x + 4) / CAVE_CHUNK), floori(float(mx.y + 4) / CAVE_CHUNK))
+	for ky in range(maxi(k0.y, 0), k1.y + 1):
+		for kx in range(maxi(k0.x, 0), k1.x + 1):
+			dirty_chunks[Vector2i(kx, ky)] = true
+
+
+func _uncover(start: Vector2i) -> Array:
+	var out: Array = []
+	var q: Array[Vector2i] = [start]
+	covered.erase(start)
+	while q.size() > 0:
+		var c: Vector2i = q.pop_back()
+		out.append(c)
+		for d in DIRS4:
+			if covered.has(c + d):
+				covered.erase(c + d)
+				q.append(c + d)
+	last_uncovered += out.size()
+	var only := {}
+	for c in out:
+		only[c] = true
+	_place_ore_lights(only)
+	_place_cave_decor(only)
+	return out
+
+
+func _process(_delta: float) -> void:
+	if dirty_chunks.is_empty():
+		return
+	var n := 0
+	for k in dirty_chunks.keys():
+		dirty_chunks.erase(k)
+		_build_cave_chunk(k)
+		n += 1
+		if n >= 4:
+			break
+
+
+func _cave_h(fx: int, fz: int) -> float:
+	if fx < 0 or fz < 0 or fx >= FW or fz >= FW:
+		return BIG
+	var i := fz * FW + fx
+	if open_f[i] == 1:
+		return 0.0
+	var d := dwall[i] * FS
+	if d > VOID:
+		return BIG
+	var t := clampf((d - FS * 0.5) / RISE, 0.0, 1.0)
+	var h := HMAX * sqrt(t) + cave_noise.get_noise_2d(fx * 3.1 + 500.0, fz * 3.1) * 0.16
+	return clampf(snappedf(h, FS), FS, HMAX)
+
+
+func _rock_color(t: int, d: float, h: float, hsh: int) -> Color:
+	var base := Color("6b4a33")
+	if depth >= 2:
+		base = Color("5d4a3e")
+	match t:
+		HARD:
+			base = Color("50586a")
+		BEDROCK:
+			base = Color("2b2b31")
+	var lvl := int(roundf(h / FS))
+	if lvl % 3 == 0:
+		base = base.lightened(0.09)
+	elif lvl % 4 == 1:
+		base = base.darkened(0.1)
+	if hsh % 17 == 0:
+		base = base.lightened(0.18)
+	var fade := clampf((d - 0.3) / (VOID - 0.3), 0.0, 1.0)
+	base = base.darkened(fade * fade * 0.92)
+	return VK.jitter(base, 0.07, hsh)
+
+
+func _cave_floor_color(fx: int, fz: int, hsh: int) -> Color:
+	var base := Color("3e332b") if hsh % 5 else Color("4a3d33")
+	if hsh % 23 == 0:
+		base = Color("5b5048")
+	var wet := cave_noise.get_noise_2d(fx * 0.6 + 200.0, fz * 0.6)
+	if wet > 0.42:
+		base = Color("2c3540") if wet > 0.5 else Color("35383a")
+	var df := dfloor[fz * FW + fx] * FS
+	base = base.darkened((1.0 - clampf(df / 0.5, 0.0, 1.0)) * 0.5)
+	return VK.jitter(base, 0.08, hsh)
+
+
+func _build_cave_chunk(k: Vector2i) -> void:
+	if chunk_nodes.has(k):
+		chunk_nodes[k].queue_free()
+		chunk_nodes.erase(k)
+	var n := CAVE_CHUNK * F
+	var bx := k.x * n
+	var bz := k.y * n
+	if bx >= FW or bz >= FW:
+		return
+	# heights with a one-column margin
+	var hc := PackedFloat32Array()
+	hc.resize((n + 2) * (n + 2))
+	for z in n + 2:
+		for x in n + 2:
+			hc[z * (n + 2) + x] = _cave_h(bx + x - 1, bz + z - 1)
+	var solid := SurfaceTool.new()
+	solid.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var glow := SurfaceTool.new()
+	glow.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var has_glow := false
+	var dirs := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	for z in n:
+		for x in n:
+			var fx := bx + x
+			var fz := bz + z
+			if fx >= FW or fz >= FW:
+				continue
+			var h := hc[(z + 1) * (n + 2) + x + 1]
+			if h >= BIG:
+				continue
+			var px := fx * FS
+			var pz := fz * FS
+			var hsh := VK.hash3(Vector3i(fx, 3, fz))
+			if h == 0.0:
+				VK.quad(solid, Vector3(px, 0, pz), Vector3(px + FS, 0, pz), Vector3(px + FS, 0, pz + FS), Vector3(px, 0, pz + FS), Vector3.UP, _cave_floor_color(fx, fz, hsh))
+				continue
+			var cell_t := cell_at(Vector2i(fx / F, fz / F))
+			var d := dwall[fz * FW + fx] * FS
+			var col := _rock_color(cell_t, d, h, hsh)
+			var st := solid
+			if cell_t == ORE and d < 0.75 and hsh % 3 == 0:
+				col = Color("5fe0f2") if hsh % 2 == 0 else Color("a07cf0")
+				st = glow
+				has_glow = true
+			VK.quad(st, Vector3(px, h, pz), Vector3(px + FS, h, pz), Vector3(px + FS, h, pz + FS), Vector3(px, h, pz + FS), Vector3.UP, col)
+			for dd in dirs:
+				var nh := hc[(z + 1 + dd.y) * (n + 2) + x + 1 + dd.x]
+				if nh >= h:
+					continue
+				var nrm := Vector3(dd.x, 0, dd.y)
+				var p0: Vector3
+				var p1: Vector3
+				if dd.x != 0:
+					var sx := px + (FS if dd.x > 0 else 0.0)
+					p0 = Vector3(sx, 0, pz)
+					p1 = Vector3(sx, 0, pz + FS)
+				else:
+					var sz := pz + (FS if dd.y > 0 else 0.0)
+					p0 = Vector3(px, 0, sz)
+					p1 = Vector3(px + FS, 0, sz)
+				var y := nh
+				while y < h - 0.001:
+					var y2 := minf(y + FS, h)
+					var sh := VK.hash3(Vector3i(fx * 5 + dd.x, int(y * 8.0), fz * 5 + dd.y))
+					var sc := _rock_color(cell_t, d, y2, sh).lightened(0.04)
+					var sst := solid
+					if cell_t == ORE and d < 0.75 and sh % 3 == 0:
+						sc = Color("4fd2e6") if sh % 2 == 0 else Color("9070e0")
+						sst = glow
+						has_glow = true
+					var up := Vector3(0, y, 0)
+					var up2 := Vector3(0, y2, 0)
+					VK.quad(sst, p0 + up, p1 + up, p1 + up2, p0 + up2, nrm, sc)
+					y = y2
+	var mesh := ArrayMesh.new()
+	solid.set_material(VK.mat_solid())
+	solid.commit(mesh)
+	if has_glow:
+		glow.set_material(VK.mat_glow())
+		glow.commit(mesh)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	add_child(mi)
+	chunk_nodes[k] = mi
+
+
+# Stalagmites, pebbles, glowing mushrooms and crystal clusters on ore. only = limit to these cells.
+func _place_cave_decor(only: Dictionary) -> void:
+	var stal := [[], [], []]
+	var peb: Array = []
+	var mush: Array = []
+	var lift_w := cell_to_world(lift_cell)
+	for fz in range(1, FW - 1, 2):
+		for fx in range(1, FW - 1, 2):
+			var i := fz * FW + fx
+			if open_f[i] != 1:
+				continue
+			var cell := Vector2i(fx / F, fz / F)
+			if not only.is_empty() and not only.has(cell):
+				continue
+			var pos := Vector3((fx + 0.5) * FS, 0, (fz + 0.5) * FS)
+			if Vector2(pos.x, pos.z).distance_to(Vector2(lift_w.x, lift_w.z)) < 2.8:
+				continue
+			var df := dfloor[i]
+			var r := rng.randf()
+			if df <= 2.0 and r < 0.02:
+				stal[rng.randi_range(0, 2)].append(_xform(pos, rng.randf() * TAU, rng.randf_range(0.7, 1.3)))
+			elif df <= 3.0 and r < 0.09:
+				peb.append(_xform(pos, rng.randf() * TAU, rng.randf_range(0.6, 1.2)))
+			elif r < 0.0035:
+				mush.append(_xform(pos, rng.randf() * TAU, 1.0))
+	for v in 3:
+		_multimesh(VK.stalagmite_mesh(v), stal[v])
+	_multimesh(VK.tuft_mesh(2), peb)
+	_multimesh(VK.tuft_mesh(3), mush)
+	for y in range(1, H - 1):
+		for x in range(1, W - 1):
+			var c := Vector2i(x, y)
+			if grid[idx(c)] != ORE or crystal_nodes.has(c):
+				continue
+			for d in DIRS4:
+				var nb: Vector2i = c + d
+				if is_floor(nb) and not covered.has(nb) and (only.is_empty() or only.has(nb)):
+					if rng.randf() < 0.55:
+						var pos := cell_to_world(c) + Vector3(d.x, 0, d.y) * 0.32
+						crystal_nodes[c] = _add_decor_mesh(VK.crystal_mesh(x * 7 + y), pos, rng.randf() * TAU, rng.randf_range(0.8, 1.2))
+					break

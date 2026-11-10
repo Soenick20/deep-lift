@@ -197,6 +197,19 @@ func _update_dig(delta: float) -> void:
 	if dig_progress >= need:
 		var was: int = lv.dig(target)
 		dig_progress = 0.0
+		# dig a little wider than one cell so the new tunnel fits a person
+		if (was == Level.DIRT or was == Level.ORE) and lv.mode == "mine":
+			var perp := Vector3(-aim.z, 0, aim.x)
+			var side := 1.0 if (global_position - wp).dot(perp) > 0.0 else -1.0
+			var nb: Vector2i = lv.world_to_cell(wp + perp * side * Level.CELL)
+			var nt: int = lv.cell_at(nb)
+			if nt == Level.DIRT or nt == Level.ORE:
+				lv.dig(nb)
+				if nt == Level.ORE:
+					ore += 1
+		if lv.last_uncovered > 0:
+			lv.last_uncovered = 0
+			game.show_message("You broke into a hidden pocket!", 2.0)
 		game.emit_noise(wp, 5.0)
 		var col := Color("5a4030")
 		if was == Level.ORE:

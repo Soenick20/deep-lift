@@ -49,8 +49,11 @@ Players who join after the class step get a role automatically.
 
 ## A mine floor, start to finish
 
-Ore veins glow and light up the tunnels around them, so you can see the mine's shape
-from a distance, but you still need torches to light your own way.
+The mines are drawn with voxels 4x finer than the gameplay grid (12.5 cm): rounded tunnels whose
+rock walls rise from the floor in small ledges, solid rock that fades into darkness, wet patches,
+stalagmites, and crystal clusters on ore. Ore veins glow and light up the tunnels around them, so
+you can see the mine's shape from a distance, but you still need torches to light your own way.
+Hidden pockets stay hidden (drawn as solid rock) until you dig into one.
 
 1. **Blink in.** The crew starts on the living lift. Every few seconds the lift pulses
    and a cyan arrow by each player points *roughly* toward the heartshard.
@@ -82,6 +85,7 @@ If everyone is down, the run ends; press Interact to dive again.
 | Charge time, leash distance, torch light radius | `scripts/game.gd` (top) |
 | Threat rate, swarm sizes | `scripts/game.gd`, `_update_state` and `emit_noise` |
 | Map size, wall height, dig times, rooms, ore | `scripts/level.gd` |
+| Cave look: rock height, how fast walls rise, where rock fades to darkness | `scripts/level.gd`: `HMAX`, `RISE`, `VOID` |
 | Characters, crawler, lift, shard models | `scripts/voxel_kit.gd` |
 
 ## Files

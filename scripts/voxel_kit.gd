@@ -679,3 +679,36 @@ static func class_gear_mesh(cls: String, s: float = 1.0 / 16.0) -> ArrayMesh:
 			v[Vector3i(4, 9, -2)] = Color("a7aab0")
 			glow[Vector3i(3, 5, -2)] = Color("f0c040")
 	return build_mesh(v, s, Vector3(4.0, 0.0, 3.5), glow)
+
+
+static func stalagmite_mesh(variant: int, s: float = 0.0625) -> ArrayMesh:
+	var v := {}
+	var hgt: int = [8, 12, 6][variant % 3]
+	var base_r: float = [1.8, 2.2, 1.5][variant % 3]
+	var col := Color("5e4a3c") if variant != 1 else Color("6b6159")
+	for y in hgt:
+		var r: float = base_r * pow(1.0 - float(y) / hgt, 1.4)
+		if y == hgt - 1:
+			r = 0.0
+		for x in range(-3, 4):
+			for z in range(-3, 4):
+				if Vector2(x, z).length() <= r:
+					var p := Vector3i(x, y, z)
+					v[p] = jitter(col.lightened(0.04 * y), 0.08, hash3(p) + variant)
+	return build_mesh(v, s, Vector3(0.5, 0, 0.5))
+
+
+static func crystal_mesh(seed_value: int, s: float = 0.05) -> ArrayMesh:
+	var glow := {}
+	var a := Color("7ef6ff")
+	var b := Color("b892ff")
+	var spikes := [[0, 0, 7], [2, 1, 4], [-2, 1, 5], [1, -2, 3]]
+	for i in spikes.size():
+		var sp: Array = spikes[i]
+		var c := a if (i + seed_value) % 2 == 0 else b
+		for y in sp[2]:
+			var lean := int(y * 0.25 * sign(sp[0]))
+			glow[Vector3i(sp[0] + lean, y, sp[1])] = c if y < sp[2] - 1 else c.lightened(0.4)
+			if y < sp[2] / 2:
+				glow[Vector3i(sp[0] + lean + 1, y, sp[1])] = c.darkened(0.15)
+	return build_mesh({}, s, Vector3(0.5, 0, 0.5), glow)

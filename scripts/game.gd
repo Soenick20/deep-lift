@@ -343,7 +343,9 @@ func start_floor(d: int) -> void:
 	for i in players.size():
 		if players[i].cls == "":
 			players[i].set_class(CLASSES[i % 3])
+	var t_gen := Time.get_ticks_msec()
 	level.generate(run_seed + d * 7919, d)
+	print("depth %d generated in %d ms" % [d, Time.get_ticks_msec() - t_gen])
 	lift_pos = level.cell_to_world(level.lift_cell)
 	lift_root.position = lift_pos
 	heart_light.light_energy = 0.7
@@ -811,7 +813,7 @@ func _update_pulse(delta: float) -> void:
 		var ang: float = a.get_meta("ang", 0.0)
 		var dir := Vector3(sin(ang), 0, cos(ang))
 		a.global_position = p.global_position + dir * (1.3 + (1.8 - t) * 0.4) + Vector3(0, 1.15, 0)
-		a.rotation.y = ang
+		a.rotation.y = ang + PI  # the arrow model points along -z
 		var s := clampf(t / 0.4, 0.0, 1.0)
 		a.scale = Vector3.ONE * s
 
@@ -1348,4 +1350,19 @@ func _run_screenshots() -> void:
 	_center_cam()
 	await _frames(40)
 	await _shot("08-mines-depth-1.png")
+	players[1].input.dig = false
+
+	# 9: the team leaving the lift into the caves, a little further out
+	for i in 3:
+		players[i].position = lift_pos + Vector3(-0.8 + i * 0.8, 0.25, -0.4)
+	_center_cam()
+	cam_target += Vector3(0, 0, -2.5)
+	place_torch(lift_pos + Vector3(0, 0, -5.0))
+	await _frames(10)
+	cam_dist = 17.0
+	set_process(false)
+	camera.position = cam_target + Vector3(0, sin(deg_to_rad(63.0)), cos(deg_to_rad(63.0))) * 17.0
+	camera.look_at(cam_target, Vector3.UP)
+	await _frames(20)
+	await _shot("09-cave-overview.png")
 	get_tree().quit(0)
