@@ -11,6 +11,9 @@ var dig := false
 var interact := false
 var interact_pressed := false
 var torch_pressed := false
+var swap := false
+var swap_pressed := false
+var _prev_swap := false
 
 var _prev_interact := false
 var _prev_torch := false
@@ -39,9 +42,12 @@ func poll() -> void:
 		interact_pressed = interact and not _prev_interact
 		_prev_interact = interact
 		torch_pressed = false
+		swap_pressed = swap and not _prev_swap
+		_prev_swap = swap
 		return
 	var i := false
 	var t := false
+	var sw := false
 	match device:
 		"kbm":
 			move = Vector2(float(_k(KEY_D)) - float(_k(KEY_A)), float(_k(KEY_S)) - float(_k(KEY_W)))
@@ -49,12 +55,14 @@ func poll() -> void:
 			dig = Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or _k(KEY_F)
 			i = _k(KEY_E)
 			t = _k(KEY_Q)
+			sw = _k(KEY_R)
 		"kb2":
 			move = Vector2(float(_k(KEY_RIGHT)) - float(_k(KEY_LEFT)), float(_k(KEY_DOWN)) - float(_k(KEY_UP)))
 			shoot = _k(KEY_PERIOD)
 			dig = _k(KEY_COMMA)
 			i = _k(KEY_SLASH)
 			t = _k(KEY_M)
+			sw = _k(KEY_N)
 		_:
 			var lx := Input.get_joy_axis(joy_id, JOY_AXIS_LEFT_X)
 			var ly := Input.get_joy_axis(joy_id, JOY_AXIS_LEFT_Y)
@@ -68,6 +76,7 @@ func poll() -> void:
 			dig = Input.get_joy_axis(joy_id, JOY_AXIS_TRIGGER_LEFT) > 0.4 or Input.is_joy_button_pressed(joy_id, JOY_BUTTON_X)
 			i = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_A)
 			t = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_Y) or Input.is_joy_button_pressed(joy_id, JOY_BUTTON_LEFT_SHOULDER)
+			sw = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_B)
 	if move.length() > 1.0:
 		move = move.normalized()
 	interact = i
@@ -75,6 +84,8 @@ func poll() -> void:
 	_prev_interact = i
 	torch_pressed = t and not _prev_torch
 	_prev_torch = t
+	swap_pressed = sw and not _prev_swap
+	_prev_swap = sw
 
 
 static func kb2_join_pressed() -> bool:

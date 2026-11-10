@@ -51,6 +51,7 @@ var cave_noise := FastNoiseLite.new()
 var dirty_chunks := {}
 var crystal_nodes := {}              # ore cell -> crystal decor
 var last_uncovered := 0
+var crate_spots: Array = []         # [{cell, pocket}]
 
 
 # ------------------------------------------------------------------ queries
@@ -246,6 +247,7 @@ func generate(seed_value: int, depth_value: int) -> void:
 			_carve_disc(p, 1.3)
 	# hidden pockets you only find by digging
 	covered.clear()
+	crate_spots.clear()
 	for i in 4:
 		var c := Vector2i(rng.randi_range(8, W - 9), rng.randi_range(8, H - 9))
 		if cell_at(c) == DIRT and _far_from_floor(c, 4):
@@ -258,6 +260,8 @@ func generate(seed_value: int, depth_value: int) -> void:
 						covered[q] = true
 			for j in 6:
 				_ore_vein(c + Vector2i(rng.randi_range(-3, 3), rng.randi_range(-3, 3)), 3)
+			if covered.has(c):
+				crate_spots.append({"cell": c, "pocket": true})
 
 	_erode_caves()
 
@@ -288,6 +292,14 @@ func generate(seed_value: int, depth_value: int) -> void:
 			nest_spots.append(_floor_near(room.c, room.r - 1.0))
 	for j in 2 + depth / 2:
 		nest_spots.append(_floor_near(sc, sr - 1.5))
+
+	# supply crates in ordinary rooms (never on the lift or in the shard room)
+	var crate_rooms: Array = rooms.filter(func(r): return r.kind == "room" or r.kind == "nest")
+	crate_rooms.shuffle()
+	for i in mini(crate_rooms.size(), 3 + depth / 2):
+		var cc := _floor_near(crate_rooms[i].c, crate_rooms[i].r - 1.5)
+		if is_floor(cc):
+			crate_spots.append({"cell": cc, "pocket": false})
 
 	_build_astar()
 	_build_fine_all()

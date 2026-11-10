@@ -8,6 +8,7 @@ const PlayerScript = preload("res://scripts/player.gd")
 const CrawlerScript = preload("res://scripts/crawler.gd")
 const PlayerInput = preload("res://scripts/player_input.gd")
 const PrologueScript = preload("res://scripts/prologue.gd")
+const Loot = preload("res://scripts/loot.gd")
 
 enum { EXPLORE, CHARGING, BLINK, GAMEOVER }
 
@@ -68,6 +69,14 @@ var hint_label: Label
 var flash_rect: ColorRect
 
 var _bit_meshes := {}
+var pickups: Array = []      # [{node, kind, data, pos, t}]
+var crates: Array = []       # [{node, cell, pocket, label}]
+var stations: Array = []     # [{node, kind, local, label}]
+var stations_root: Node3D
+var bank_ore := 0
+var loot_rng := RandomNumberGenerator.new()
+var stash_label: Label
+var _banked_msg := 0
 var env: Environment
 var mode := "mine"
 var prologue = null
@@ -186,12 +195,27 @@ func _setup_hud() -> void:
 	threat_bar.add_theme_stylebox_override("background", bg)
 	threat_bar.add_theme_stylebox_override("fill", fg)
 	tbox.add_child(threat_bar)
+	stash_label = _label(20, Color("7ef6ff"))
+	stash_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	stash_label.position = Vector2(-330, 82)
+	stash_label.size = Vector2(300, 30)
+	root.add_child(stash_label)
 
 	var pbox := VBoxContainer.new()
 	pbox.position = Vector2(20, 100)
 	root.add_child(pbox)
 	for i in 4:
-		var l := _label(19, PLAYER_COLORS[i].lightened(0.35))
+		var l := RichTextLabel.new()
+		l.bbcode_enabled = true
+		l.fit_content = true
+		l.scroll_active = false
+		l.autowrap_mode = TextServer.AUTOWRAP_OFF
+		l.custom_minimum_size = Vector2(900, 0)
+		l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		l.add_theme_font_size_override("normal_font_size", 19)
+		l.add_theme_constant_override("outline_size", 7)
+		l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+		l.add_theme_color_override("default_color", PLAYER_COLORS[i].lightened(0.35))
 		pbox.add_child(l)
 		player_labels.append(l)
 
@@ -226,6 +250,28 @@ func _build_lift() -> void:
 	heart_light.omni_range = 4.0
 	heart_light.light_energy = 0.7
 	lift_root.add_child(heart_light)
+	stations_root = Node3D.new()
+	lift_root.add_child(stations_root)
+	var defs := [
+		["workbench", VK.workbench_mesh(), Vector3(-1.62, 0.25, 0.1), PI / 2.0],
+		["medbay", VK.medbay_mesh(), Vector3(1.62, 0.25, 0.15), 0.0],
+		["torches", VK.torch_rack_mesh(), Vector3(0.0, 0.25, 1.72), 0.0]]
+	for dfn in defs:
+		var mi := MeshInstance3D.new()
+		mi.mesh = dfn[1]
+		mi.position = dfn[2]
+		mi.rotation.y = dfn[3]
+		stations_root.add_child(mi)
+		var lab := Label3D.new()
+		lab.font_size = 34
+		lab.outline_size = 9
+		lab.pixel_size = 0.006
+		lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lab.no_depth_test = true
+		lab.position = dfn[2] + Vector3(0, 1.15, 0)
+		lab.visible = false
+		stations_root.add_child(lab)
+		stations.append({"node": mi, "kind": dfn[0], "local": dfn[2], "label": lab})
 
 
 func _build_shard() -> void:
@@ -263,6 +309,8 @@ func _add_player(dev: String, joy: int):
 func start_run() -> void:
 	depth = 1
 	run_seed = randi()
+	bank_ore = 0
+	loot_rng.seed = run_seed + 17
 	for p in players:
 		p.hp = PlayerScript.MAX_HP
 		p.torches = 5
@@ -287,6 +335,12 @@ func _clear_floor_objects() -> void:
 	for t in torches:
 		t.node.queue_free()
 	torches.clear()
+	for pk in pickups:
+		pk.node.queue_free()
+	pickups.clear()
+	for cr in crates:
+		cr.node.queue_free()
+	crates.clear()
 	if shard.get_parent() != self:
 		shard.reparent(self)
 	shard_fed = false
@@ -301,6 +355,7 @@ func start_prologue() -> void:
 	if prologue:
 		prologue.cleanup()
 	level.generate_surface(run_seed)
+	stations_root.visible = false
 	lift_pos = level.cell_to_world(level.lift_cell)
 	lift_root.position = lift_pos
 	shard.position = level.surface.altar
@@ -363,6 +418,10 @@ func start_floor(d: int) -> void:
 	# monsters
 	for c in level.nest_spots:
 		_spawn_crawler(level.cell_to_world(c), false)
+	# loot crates and the lift's stations
+	stations_root.visible = true
+	for sp in level.crate_spots:
+		_spawn_crate(sp.cell, sp.pocket)
 	# players onto the platform
 	for i in players.size():
 		var p = players[i]
@@ -439,6 +498,7 @@ func _process(delta: float) -> void:
 	_update_bits(delta)
 	_update_rings(delta)
 	_update_shard(delta)
+	_update_loot(delta)
 	_update_state(delta)
 	_update_pulse(delta)
 	_update_camera(delta)
@@ -549,6 +609,8 @@ func player_interact(p) -> void:
 		return
 	if not shard_fed and shard_carrier == null and _flat_dist(p.global_position, shard.global_position) < 1.3:
 		pick_up(p)
+		return
+	if _try_loot_interact(p):
 		return
 	for o in players:
 		if o != p and o.downed and o.global_position.distance_to(p.global_position) < 1.3:
@@ -667,13 +729,19 @@ func emit_noise(pos: Vector3, radius: float) -> void:
 		_spawn_ring(pos, radius)
 
 
-func spawn_bullet(origin: Vector3, dir: Vector3, owner, life: float = 0.75) -> void:
+func spawn_bullet(origin: Vector3, dir: Vector3, owner, life: float = 0.75, w: Dictionary = {}, noisy: bool = true) -> void:
 	var mi := MeshInstance3D.new()
-	mi.mesh = _bit_mesh(Color("ffe08a"), true, 0.09)
+	var col := Color("ffe08a")
+	if w.get("rarity", 0) == 1:
+		col = Color("8cc8ff")
+	elif w.get("rarity", 0) == 2:
+		col = Color("d9a8ff")
+	mi.mesh = _bit_mesh(col, true, 0.11 if w.get("type", "") == "Rifle" else 0.09)
 	add_child(mi)
 	mi.global_position = origin
-	bullets.append({"node": mi, "dir": dir, "life": life})
-	emit_noise(owner.global_position, 9.0)
+	bullets.append({"node": mi, "dir": dir, "life": life, "dmg": w.get("dmg", 1.0), "speed": w.get("speed", 20.0), "pierce": w.get("pierce", 0), "hit": []})
+	if noisy:
+		emit_noise(owner.global_position, w.get("noise", 9.0))
 
 
 func _update_bullets(delta: float) -> void:
@@ -682,15 +750,19 @@ func _update_bullets(delta: float) -> void:
 		var hit := false
 		var steps := 4
 		for s in steps:
-			var np: Vector3 = b.node.global_position + b.dir * 20.0 * delta / steps
+			var np: Vector3 = b.node.global_position + b.dir * b.speed * delta / steps
 			if level.is_solid_world(np):
 				debris(np - b.dir * 0.1, Color("ffcf6a"), 3)
 				hit = true
 				break
 			for c in crawlers:
-				if is_instance_valid(c) and c.is_alive() and _flat_dist(np, c.global_position) < 0.42:
-					c.hit(1, b.dir)
-					hit = true
+				if is_instance_valid(c) and c.is_alive() and not (c in b.hit) and _flat_dist(np, c.global_position) < 0.42:
+					c.hit(b.dmg, b.dir)
+					if b.pierce > 0:
+						b.pierce -= 1
+						b.hit.append(c)
+					else:
+						hit = true
 					break
 			if hit:
 				break
@@ -911,23 +983,28 @@ func _update_hud(delta: float) -> void:
 			objective_label.text = ""
 		GAMEOVER:
 			objective_label.text = "Run over"
+	stash_label.visible = mode == "mine"
+	stash_label.text = "LIFT STASH  %d ore" % bank_ore
 	for i in 4:
-		var l: Label = player_labels[i]
+		var l: RichTextLabel = player_labels[i]
 		if i < players.size():
 			var p = players[i]
 			var bar := "#".repeat(p.hp) + "-".repeat(PlayerScript.MAX_HP - p.hp)
 			var status := "  DOWN" if p.downed else ("  [SHARD]" if p.carrying else "")
 			var role: String = p.cls if p.cls != "" else "no role yet"
-			l.text = "P%d %s  HP [%s]  Torches %d  Ore %d%s" % [i + 1, role, bar, p.torches, p.ore, status]
+			var w: Dictionary = p.weapon
+			var gun_txt := "[color=#%s]%s[/color]" % [Loot.color_of(w).to_html(false), Loot.name_of(w)]
+			var spare := ("  +%d" % p.pack.size()) if p.pack.size() > 0 else ""
+			l.text = "P%d %s  HP [%s]  %s%s  Torches %d  Ore %d%s" % [i + 1, role, bar, gun_txt, spare, p.torches, p.ore, status]
 		else:
 			l.text = ""
 	var joinable := players.size() < 4
 	if prologue:
 		hint_label.text = prologue.hint() + "\nTab / Back: skip the tutorial"
 	else:
-		hint_label.text = "P1: WASD move, mouse aim, LMB shoot, RMB dig, E interact, Q torch   |   Controller: sticks, RT shoot, LT dig, A interact, Y torch"
+		hint_label.text = "P1: WASD move, mouse aim, LMB shoot, RMB dig, E interact, Q torch, R swap gun   |   Controller: sticks, RT shoot, LT dig, A interact, Y torch, B swap"
 		if joinable:
-			hint_label.text += "\nMore players: press A on a controller, or arrow keys for a 2nd keyboard player ( . shoot  , dig  / interact  M torch )"
+			hint_label.text += "\nMore players: press A on a controller, or arrow keys for a 2nd keyboard player ( . shoot  , dig  / interact  M torch  N swap )"
 
 
 # ------------------------------------------------------------------ autotest (headless)
@@ -1061,6 +1138,60 @@ func _run_autotest() -> void:
 	if level.ore_lights.size() < 5:
 		return _fail("expected glowing ore lights, got %d" % level.ore_lights.size())
 	print("first jump ok: depth 1, ore lights=%d" % level.ore_lights.size())
+
+	# ---------------- loot
+	if crates.size() < 3:
+		return _fail("expected loot crates, got %d" % crates.size())
+	var cr = null
+	for c in crates:
+		if not c.pocket:
+			cr = c
+			break
+	var n_crates := crates.size()
+	p1.position = cr.node.position + Vector3(0.5, 0, 0)
+	player_interact(p1)
+	if crates.size() != n_crates - 1 or pickups.size() == 0:
+		return _fail("opening a crate gave nothing")
+	for pk in pickups:
+		pk.node.queue_free()
+	pickups.clear()
+	var first_type: String = p1.weapon.type
+	_spawn_pickup("gun", p1.position + Vector3(0.3, 0, 0), Loot.make("Rifle", 1, loot_rng))
+	player_interact(p1)
+	if p1.weapon.type != "Rifle" or p1.weapon.rarity != 1 or p1.pack.size() != 1:
+		return _fail("gun pick up failed (%s, pack %d)" % [p1.weapon.type, p1.pack.size()])
+	p1.input.swap = true
+	await _frames(2)
+	p1.input.swap = false
+	await _frames(2)
+	if p1.weapon.type != first_type or p1.pack[0].type != "Rifle":
+		return _fail("swap failed")
+	p1.input.swap = true
+	await _frames(2)
+	p1.input.swap = false
+	await _frames(2)
+	p1.ore = 20
+	p1.position = lift_pos + Vector3(0.3, 0.25, 0.3)
+	await _frames(3)
+	if bank_ore != 20 or p1.ore != 0:
+		return _fail("ore was not stored on the lift (bank %d)" % bank_ore)
+	var wb = stations.filter(func(st): return st.kind == "workbench")[0]
+	p1.position = _station_world(wb)
+	player_interact(p1)
+	if p1.weapon.rarity != 2 or bank_ore != 20 - Loot.UPGRADE_COST[1]:
+		return _fail("workbench upgrade failed (rarity %d, bank %d)" % [p1.weapon.rarity, bank_ore])
+	var mb = stations.filter(func(st): return st.kind == "medbay")[0]
+	p1.hp = 2
+	p1.position = _station_world(mb)
+	player_interact(p1)
+	if p1.hp != PlayerScript.MAX_HP:
+		return _fail("med bay heal failed")
+	var kc = _spawn_crawler(p1.global_position + Vector3(0, 0, -6.0), false)
+	kc.hit(999.0, Vector3.FORWARD)
+	print("loot ok: Epic %s, bank %d, pickups after kill %d" % [p1.weapon.type, bank_ore, pickups.size()])
+	for pk in pickups:
+		pk.node.queue_free()
+	pickups.clear()
 
 	# ---------------- mines
 	if not level.is_floor(level.lift_cell):
@@ -1352,6 +1483,60 @@ func _run_screenshots() -> void:
 	await _shot("08-mines-depth-1.png")
 	players[1].input.dig = false
 
+	# 9: loot: a crate cracked open, guns of each rarity with their beams
+	var cr = null
+	for c in crates:
+		if not c.pocket:
+			cr = c
+			break
+	if cr:
+		var cpos: Vector3 = cr.node.position
+		for c in crawlers:
+			if is_instance_valid(c) and c.global_position.distance_to(cpos) < 7.0:
+				c.queue_free()
+		crawlers = crawlers.filter(func(c): return is_instance_valid(c) and c.global_position.distance_to(cpos) >= 7.0)
+		players[0].position = cpos + Vector3(-0.9, 0, 0.7)
+		players[1].position = cpos + Vector3(0.9, 0, 0.8)
+		players[2].position = cpos + Vector3(0.1, 0, 1.4)
+		for p in players:
+			if not level.can_occupy(p.position, 0.2):
+				p.position = cpos + Vector3(randf_range(-0.4, 0.4), 0, 1.0)
+		players[0].take_weapon(Loot.make("SMG", 1, loot_rng))
+		players[2].take_weapon(Loot.make("Rifle", 2, loot_rng))
+		_open_crate(cr)
+		_spawn_pickup("gun", cpos + Vector3(-0.4, 0, -0.3), Loot.make("Pistol", 0, loot_rng))
+		_spawn_pickup("gun", cpos + Vector3(0.0, 0, -0.55), Loot.make("Shotgun", 1, loot_rng))
+		_spawn_pickup("gun", cpos + Vector3(0.45, 0, -0.25), Loot.make("Rifle", 2, loot_rng))
+		_spawn_pickup("ore", cpos + Vector3(-0.6, 0, 0.2), 4)
+		place_torch(cpos + Vector3(-1.4, 0, 1.6))
+		for p in players:
+			p.facing = (cpos - p.position).normalized()
+		_center_cam()
+		message_t = 0.0
+		await _frames(30)
+		await _shot("09-loot-cache.png")
+		for pk in pickups:
+			pk.node.queue_free()
+		pickups.clear()
+
+	# 10: back on the lift: stash, workbench, med bay, torch rack
+	bank_ore = 14
+	for i in 3:
+		players[i].ore = 0
+	players[0].position = _station_world(stations[0]) + Vector3(0.35, 0, 0)
+	players[1].position = _station_world(stations[1]) + Vector3(-0.35, 0, 0)
+	players[2].position = lift_pos + Vector3(0.2, 0.25, 0.9)
+	players[0].facing = Vector3(-1, 0, 0)
+	players[1].facing = Vector3(1, 0, 0)
+	players[2].facing = Vector3(0, 0, 1)
+	_center_cam()
+	cam_target = lift_pos + Vector3(0, 0, 0.3)
+	show_message("P1 upgraded to Epic SMG!", 99.0)
+	players[0].equip(Loot.make("SMG", 2, loot_rng))
+	await _frames(30)
+	await _shot("10-lift-stations.png")
+	message_t = 0.0
+
 	# 9: the team leaving the lift into the caves, a little further out
 	for i in 3:
 		players[i].position = lift_pos + Vector3(-0.8 + i * 0.8, 0.25, -0.4)
@@ -1364,5 +1549,290 @@ func _run_screenshots() -> void:
 	camera.position = cam_target + Vector3(0, sin(deg_to_rad(63.0)), cos(deg_to_rad(63.0))) * 17.0
 	camera.look_at(cam_target, Vector3.UP)
 	await _frames(20)
-	await _shot("09-cave-overview.png")
+	await _shot("11-cave-overview.png")
 	get_tree().quit(0)
+
+
+# ================================================================== loot
+var _pickup_meshes := {}
+
+
+func _spawn_crate(cell: Vector2i, pocket: bool) -> void:
+	var n := Node3D.new()
+	var mi := MeshInstance3D.new()
+	mi.mesh = VK.loot_crate_mesh(pocket)
+	n.add_child(mi)
+	add_child(n)
+	n.position = level.cell_to_world(cell)
+	n.rotation.y = loot_rng.randf() * TAU
+	var lab := Label3D.new()
+	lab.text = "OPEN"
+	lab.font_size = 30
+	lab.outline_size = 8
+	lab.pixel_size = 0.006
+	lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lab.no_depth_test = true
+	lab.modulate = Color("ffd166") if not pocket else Color("d9a8ff")
+	lab.position = Vector3(0, 0.75, 0)
+	lab.visible = false
+	n.add_child(lab)
+	crates.append({"node": n, "cell": cell, "pocket": pocket, "label": lab})
+
+
+func _open_crate(cr: Dictionary) -> void:
+	var pos: Vector3 = cr.node.global_position
+	crates.erase(cr)
+	cr.node.queue_free()
+	debris(pos + Vector3(0, 0.3, 0), Color("8a5a33") if not cr.pocket else Color("4b3f5c"), 12)
+	emit_noise(pos, 4.0)
+	var r := loot_rng.randf()
+	var drops: Array = []
+	if cr.pocket:
+		drops.append(["gun", Loot.roll_weapon(loot_rng, depth, 25.0)])
+		drops.append(["ore", loot_rng.randi_range(3, 6)])
+	elif r < 0.5:
+		drops.append(["gun", Loot.roll_weapon(loot_rng, depth)])
+	elif r < 0.8:
+		drops.append(["ore", loot_rng.randi_range(3, 6)])
+	else:
+		drops.append(["torches", 2] if loot_rng.randf() < 0.5 else ["medkit", 2])
+	for i in drops.size():
+		var a := TAU * i / drops.size() + loot_rng.randf()
+		_spawn_pickup(drops[i][0], pos + Vector3(cos(a), 0, sin(a)) * 0.35, drops[i][1])
+	show_message("Supply crate!" if not cr.pocket else "A rare cache!", 1.2)
+
+
+func _pickup_mesh(kind: String, data) -> Mesh:
+	var key: String = kind
+	if kind == "gun":
+		key = "gun-%s-%d" % [data.type, data.rarity]
+	if not _pickup_meshes.has(key):
+		match kind:
+			"gun":
+				_pickup_meshes[key] = VK.gun_mesh(data.type, Loot.color_of(data), 1.0 / 11.0)
+			"ore":
+				_pickup_meshes[key] = VK.ore_chunk_mesh()
+			"medkit":
+				_pickup_meshes[key] = VK.medkit_mesh()
+			"torches":
+				_pickup_meshes[key] = VK.torch_mesh()
+	return _pickup_meshes[key]
+
+
+func _spawn_pickup(kind: String, pos: Vector3, data) -> void:
+	var n := Node3D.new()
+	var mi := MeshInstance3D.new()
+	mi.mesh = _pickup_mesh(kind, data)
+	mi.name = "Mesh"
+	n.add_child(mi)
+	if kind == "gun":
+		mi.rotation.z = PI / 2.0
+		var col := Loot.color_of(data)
+		var beam := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.12, 3.0, 0.12)
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = Color(col.r, col.g, col.b, 0.5)
+		bm.material = mat
+		beam.mesh = bm
+		beam.position = Vector3(0, 1.5, 0)
+		n.add_child(beam)
+		var l := OmniLight3D.new()
+		l.light_color = col
+		l.light_energy = 0.9 + data.rarity * 0.3
+		l.omni_range = 2.2
+		l.position = Vector3(0, 0.6, 0)
+		n.add_child(l)
+		var lab := Label3D.new()
+		lab.text = Loot.name_of(data)
+		lab.font_size = 30
+		lab.outline_size = 8
+		lab.pixel_size = 0.006
+		lab.modulate = col
+		lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lab.no_depth_test = true
+		lab.position = Vector3(0, 0.8 + data.rarity * 0.24, 0)
+		n.add_child(lab)
+	add_child(n)
+	n.position = Vector3(pos.x, ground_y(pos), pos.z)
+	pickups.append({"node": n, "kind": kind, "data": data, "t": loot_rng.randf() * 6.0})
+
+
+func drop_ore(pos: Vector3, n: int) -> void:
+	_spawn_pickup("ore", pos + Vector3(0.2, 0, 0.1), n)
+
+
+func on_crawler_killed(c) -> void:
+	if mode != "mine" or c.kind != "crawler":
+		return
+	var r := loot_rng.randf()
+	if r < 0.06 + 0.01 * depth:
+		_spawn_pickup("gun", c.global_position, Loot.roll_weapon(loot_rng, depth, 10.0))
+	elif r < 0.45:
+		_spawn_pickup("ore", c.global_position, loot_rng.randi_range(1, 2))
+
+
+func _station_world(st: Dictionary) -> Vector3:
+	return lift_root.global_transform * st.local
+
+
+func _station_text(st: Dictionary, p) -> String:
+	match st.kind:
+		"workbench":
+			if p == null or p.weapon.rarity >= 2:
+				return "WORKBENCH\nYour gun is already Epic" if p else "WORKBENCH"
+			return "WORKBENCH\nUpgrade to %s: %d ore" % [Loot.RARITY_NAMES[p.weapon.rarity + 1], Loot.UPGRADE_COST[p.weapon.rarity]]
+		"medbay":
+			return "MED BAY\nHeal fully: 3 ore"
+		"torches":
+			return "TORCH RACK\n2 torches: 2 ore"
+	return ""
+
+
+func _use_station(st: Dictionary, p) -> void:
+	match st.kind:
+		"workbench":
+			var w: Dictionary = p.weapon
+			if w.rarity >= 2:
+				show_message("That %s is already Epic." % w.type, 1.5)
+				return
+			var cost: int = Loot.UPGRADE_COST[w.rarity]
+			if bank_ore < cost:
+				show_message("Need %d ore in the lift stash (have %d).\nStep onto the lift to store the ore you carry." % [cost, bank_ore], 2.5)
+				return
+			bank_ore -= cost
+			p.equip(Loot.make(w.type, w.rarity + 1, loot_rng))
+			debris(_station_world(st) + Vector3(0, 0.8, 0), Loot.color_of(p.weapon), 14)
+			show_message("P%d upgraded to %s!" % [p.index + 1, Loot.name_of(p.weapon)], 2.0)
+		"medbay":
+			if p.hp >= PlayerScript.MAX_HP:
+				show_message("Already at full health.", 1.2)
+				return
+			if bank_ore < 3:
+				show_message("Need 3 ore in the lift stash.", 1.5)
+				return
+			bank_ore -= 3
+			p.hp = PlayerScript.MAX_HP
+			debris(p.global_position + Vector3(0, 1.0, 0), Color("6dffa8"), 10)
+			show_message("P%d is patched up." % (p.index + 1), 1.2)
+		"torches":
+			if bank_ore < 2:
+				show_message("Need 2 ore in the lift stash.", 1.5)
+				return
+			if p.torches >= 12:
+				show_message("Can't carry more torches.", 1.2)
+				return
+			bank_ore -= 2
+			p.torches = mini(p.torches + 2, 12)
+			show_message("P%d took 2 torches." % (p.index + 1), 1.0)
+
+
+# Interact with the nearest gun on the floor, crate or lift station. Returns true if something was used.
+func _try_loot_interact(p) -> bool:
+	var best = null
+	var best_kind := ""
+	var bd := 1.15
+	for pk in pickups:
+		if pk.kind == "gun":
+			var d := _flat_dist(p.global_position, pk.node.global_position)
+			if d < bd:
+				bd = d
+				best = pk
+				best_kind = "gun"
+	for cr in crates:
+		if not cr.node.visible:
+			continue
+		var d := _flat_dist(p.global_position, cr.node.global_position)
+		if d < bd:
+			bd = d
+			best = cr
+			best_kind = "crate"
+	if mode == "mine":
+		for st in stations:
+			var d := _flat_dist(p.global_position, _station_world(st))
+			if d < bd:
+				bd = d
+				best = st
+				best_kind = "station"
+	match best_kind:
+		"gun":
+			pickups.erase(best)
+			best.node.queue_free()
+			var dropped: Dictionary = p.take_weapon(best.data)
+			if not dropped.is_empty():
+				_spawn_pickup("gun", p.global_position + Vector3(0.35, 0, 0.2), dropped)
+			show_message("P%d picked up %s" % [p.index + 1, Loot.name_of(p.weapon)], 1.5)
+			return true
+		"crate":
+			_open_crate(best)
+			return true
+		"station":
+			_use_station(best, p)
+			return true
+	return false
+
+
+func _update_loot(delta: float) -> void:
+	# pickups bob and spin; ore, torches and medkits are collected by walking over them
+	var keep: Array = []
+	for pk in pickups:
+		pk.t += delta
+		var m: Node3D = pk.node.get_node("Mesh")
+		m.position.y = 0.25 + sin(pk.t * 3.0) * 0.06
+		m.rotation.y += delta * 1.5
+		var taken := false
+		if pk.kind != "gun":
+			for p in players:
+				if p.downed or _flat_dist(p.global_position, pk.node.global_position) > 0.7:
+					continue
+				match pk.kind:
+					"ore":
+						p.ore += int(pk.data)
+					"torches":
+						p.torches = mini(p.torches + int(pk.data), 12)
+					"medkit":
+						p.hp = mini(p.hp + int(pk.data), PlayerScript.MAX_HP)
+				debris(pk.node.global_position + Vector3(0, 0.3, 0), Color("7ef6ff") if pk.kind == "ore" else Color("ffd166"), 5)
+				taken = true
+				break
+		if taken:
+			pk.node.queue_free()
+		else:
+			keep.append(pk)
+	pickups = keep
+	# crates inside undiscovered pockets stay hidden; show prompts near players
+	for cr in crates:
+		cr.node.visible = not level.covered.has(cr.cell)
+		var near := false
+		for p in players:
+			if not p.downed and _flat_dist(p.global_position, cr.node.global_position) < 1.6:
+				near = true
+		cr.label.visible = near and cr.node.visible
+	# lift stations: prompts, and carried ore is stored when you step on the lift
+	if mode != "mine":
+		return
+	for st in stations:
+		var nearest = null
+		var nd := 2.0
+		for p in players:
+			var d := _flat_dist(p.global_position, _station_world(st))
+			if not p.downed and d < nd:
+				nd = d
+				nearest = p
+		st.label.visible = nearest != null
+		if nearest:
+			st.label.text = _station_text(st, nearest)
+			st.label.modulate = Color("e8f6ff")
+	if state == GAMEOVER:
+		return
+	var stored := 0
+	for p in players:
+		if not p.downed and p.ore > 0 and _flat_dist(p.global_position, lift_pos) < LIFT_RADIUS:
+			stored += p.ore
+			bank_ore += p.ore
+			p.ore = 0
+	if stored > 0:
+		debris(lift_pos + Vector3(0, 0.8, 0), Color("7ef6ff"), 6)
+		show_message("+%d ore stored in the lift" % stored, 1.5)

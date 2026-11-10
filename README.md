@@ -23,6 +23,7 @@ All art is generated from code. There are no asset files and no sound yet.
 | Dig (hold) | Right mouse or F | `,` | Left trigger or X |
 | Interact (pick up, feed, drop, hold to revive) | E | `/` | A |
 | Place torch | Q | M | Y or LB |
+| Swap gun (backpack) | R | N | B |
 
 ## The prologue (tutorial): the first night
 
@@ -46,6 +47,20 @@ the screen and the controls you need at the bottom. Press **Tab** (or **Back** o
    opens its eyes, and you hold the platform for 12 seconds. Then it **blinks** into the mines.
 
 Players who join after the class step get a role automatically.
+
+## Loot
+
+- **Guns:** Pistol, Shotgun, SMG and Rifle, each in **Common** (white), **Rare** (blue) or **Epic**
+  (purple), with slightly random stats. Rifles pierce through enemies. Rarer guns get more likely the deeper you go.
+- **Where loot comes from:** supply crates in cave rooms, better caches inside hidden pockets,
+  and drops from crawlers (ore often, guns sometimes).
+- **On the floor:** guns float with a beam in their rarity colour; press Interact to pick one up.
+  Ore, torches and medkits are picked up by walking over them.
+- **Backpack:** one gun in hand plus 2 spare. Picking up a gun when the pack is full drops your current one.
+- **The lift stash:** ore you carry is stored when you step onto the lift. If you go down
+  before that, you drop the ore you were carrying, and a teammate can grab it.
+- **Lift stations** (spend stored ore): **Workbench** upgrades the gun in your hand one rarity
+  (Common to Rare 6 ore, Rare to Epic 12), **Med bay** heals fully (3 ore), **Torch rack** gives 2 torches (2 ore).
 
 ## A mine floor, start to finish
 
@@ -83,6 +98,7 @@ If everyone is down, the run ends; press Interact to dive again.
 | Player speed, carry slowdown, fire rate, health | `scripts/player.gd` (top) |
 | Crawler speed, sight range, attack | `scripts/crawler.gd` (top) |
 | Charge time, leash distance, torch light radius | `scripts/game.gd` (top) |
+| Gun stats, rarity odds, upgrade costs | `scripts/loot.gd` |
 | Threat rate, swarm sizes | `scripts/game.gd`, `_update_state` and `emit_noise` |
 | Map size, wall height, dig times, rooms, ore | `scripts/level.gd` |
 | Cave look: rock height, how fast walls rise, where rock fades to darkness | `scripts/level.gd`: `HMAX`, `RISE`, `VOID` |
@@ -95,6 +111,7 @@ If everyone is down, the run ends; press Interact to dive again.
 - `scripts/level.gd`: mine and surface generators, diggable chunked voxel walls, ore lights, pathfinding
 - `scripts/player.gd`, `scripts/player_input.gd`: player actions, animation, input devices
 - `scripts/crawler.gd`: the monster (sleep, investigate noise, chase, attack)
+- `scripts/loot.gd`: weapon types, rarities, stat rolls and loot odds
 - `scripts/voxel_kit.gd`: builds all models from voxels
 - `screenshots/`: images rendered from this build
 
@@ -123,5 +140,5 @@ godot --path . -- --shot=/full/path/to/screenshots
 
 ## Not in this prototype yet
 
-Sound, class abilities beyond the tent upgrades, loot and more weapons, lift stations,
-the branching map, and menus. Those are Phase 2 and later in the design doc.
+Sound, class abilities beyond the tent upgrades, the branching map with Vault and Mini-boss
+floors, more monster types, and menus. Those are Phase 2 and later in the design doc.

@@ -13,7 +13,7 @@ const ATTACK_COOLDOWN := 0.9
 
 var game
 var state := SLEEP
-var hp := 3
+var hp := 3.0
 var target_pos := Vector3.ZERO
 var path := PackedVector3Array()
 var path_i := 0
@@ -45,8 +45,10 @@ func setup(g, pos: Vector3, awake: bool, k: String = "crawler") -> void:
 			_meshes[kind] = VK.crawler_parts()
 	var m: Dictionary = _meshes[kind]
 	if kind == "critter":
-		hp = 1
+		hp = 1.0
 		speed_mul = 0.85
+	else:
+		hp = 3.0 + 0.6 * maxf(game.depth - 1, 0)
 	body = MeshInstance3D.new()
 	body.mesh = m.body
 	add_child(body)
@@ -85,7 +87,7 @@ func hear(p: Vector3) -> void:
 		zzz.visible = false
 
 
-func hit(dmg: int, dir: Vector3) -> void:
+func hit(dmg: float, dir: Vector3) -> void:
 	if state == DEAD:
 		return
 	hp -= dmg
@@ -94,8 +96,9 @@ func hit(dmg: int, dir: Vector3) -> void:
 	if state != CHASE:
 		state = CHASE
 		zzz.visible = false
-	if hp <= 0:
+	if hp <= 0.0:
 		state = DEAD
+		game.on_crawler_killed(self)
 		game.debris(global_position + Vector3(0, 0.25, 0), Color("6a3f80") if kind == "crawler" else Color("8a7440"), 14)
 		game.debris(global_position + Vector3(0, 0.25, 0), Color("c6ff3d"), 4)
 		queue_free()

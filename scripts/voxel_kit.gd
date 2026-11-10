@@ -712,3 +712,173 @@ static func crystal_mesh(seed_value: int, s: float = 0.05) -> ArrayMesh:
 			if y < sp[2] / 2:
 				glow[Vector3i(sp[0] + lean + 1, y, sp[1])] = c.darkened(0.15)
 	return build_mesh({}, s, Vector3(0.5, 0, 0.5), glow)
+
+
+# ================================================================ loot and stations
+# Guns are built pointing along +z, grip hanging down at the origin.
+static func gun_mesh(type: String, accent: Color, s: float = 1.0 / 24.0) -> ArrayMesh:
+	var v := {}
+	var glow := {}
+	var metal := Color("3b3f46")
+	var dark := Color("26282d")
+	var wood := Color("7a4e2c")
+	var length := 5
+	match type:
+		"Pistol":
+			length = 5
+		"Shotgun":
+			length = 10
+		"SMG":
+			length = 7
+		"Rifle":
+			length = 12
+	for z in length:
+		v[Vector3i(0, 0, z)] = metal if z < length - 1 else dark
+		if type != "Rifle" or z < 6:
+			v[Vector3i(0, 1, z)] = metal.lightened(0.1)
+	# grip
+	for y in range(-3, 0):
+		v[Vector3i(0, y, 0)] = wood if type == "Shotgun" or type == "Rifle" else dark
+	match type:
+		"Shotgun":
+			for z in range(-4, 0):
+				v[Vector3i(0, 0, z)] = wood
+				v[Vector3i(0, -1, z)] = wood
+			for z in range(3, 6):
+				v[Vector3i(0, -1, z)] = wood.lightened(0.15)
+		"SMG":
+			for y in range(-4, -1):
+				v[Vector3i(0, y, 3)] = dark
+			v[Vector3i(0, -1, 5)] = dark
+		"Rifle":
+			for z in range(-4, 0):
+				v[Vector3i(0, 0, z)] = wood
+				v[Vector3i(0, -1, z)] = wood
+			for z in range(2, 6):
+				v[Vector3i(0, 2, z)] = dark
+			v[Vector3i(0, 2, 6)] = Color("7fd6ff")
+	# rarity stripe
+	for z in range(1, mini(length - 1, 5)):
+		var p := Vector3i(1, 0, z)
+		if accent.v > 0.95 and accent.s < 0.1:
+			v[p] = accent
+		else:
+			glow[p] = accent
+			glow[Vector3i(-1, 0, z)] = accent
+	return build_mesh(v, s, Vector3(0.5, 0.0, 0.5), glow)
+
+
+static func loot_crate_mesh(epic: bool, s: float = 0.0625) -> ArrayMesh:
+	var v := {}
+	var glow := {}
+	var wood := Color("8a5a33") if not epic else Color("4b3f5c")
+	var band := Color("5c6068") if not epic else Color("8a7bb0")
+	for x in 8:
+		for y in 6:
+			for z in 6:
+				var edge := int(x == 0 or x == 7) + int(y == 0 or y == 5) + int(z == 0 or z == 5) >= 2
+				var c := band if edge or x == 2 or x == 5 else jitter(wood, 0.08, hash3(Vector3i(x, y, z)))
+				v[Vector3i(x, y, z)] = c
+	v.erase(Vector3i(3, 3, 5))
+	v.erase(Vector3i(4, 3, 5))
+	glow[Vector3i(3, 3, 6)] = Color("ffd166") if not epic else Color("c07bff")
+	glow[Vector3i(4, 3, 6)] = Color("ffd166") if not epic else Color("c07bff")
+	return build_mesh(v, s, Vector3(4, 0, 3), glow)
+
+
+static func ore_chunk_mesh(s: float = 0.05) -> ArrayMesh:
+	var v := {}
+	var glow := {}
+	for p in [Vector3i(0, 0, 0), Vector3i(1, 0, 0), Vector3i(0, 0, 1), Vector3i(1, 0, 1), Vector3i(0, 1, 0), Vector3i(1, 1, 1), Vector3i(-1, 0, 1)]:
+		v[p] = Color("4a3a30")
+	for p in [Vector3i(0, 1, 1), Vector3i(1, 1, 0), Vector3i(0, 2, 1), Vector3i(1, 2, 0), Vector3i(1, 3, 0)]:
+		glow[p] = Color("7ef6ff") if p.y % 2 == 0 else Color("b892ff")
+	return build_mesh(v, s, Vector3(0.5, 0, 0.5), glow)
+
+
+static func medkit_mesh(s: float = 0.05) -> ArrayMesh:
+	var v := {}
+	for x in 6:
+		for y in 4:
+			for z in 4:
+				v[Vector3i(x, y, z)] = Color("e8e8e8")
+	for p in [Vector3i(2, 3, 2), Vector3i(3, 3, 2), Vector3i(2, 3, 1), Vector3i(3, 3, 1), Vector3i(1, 3, 1), Vector3i(4, 3, 1), Vector3i(2, 3, 0), Vector3i(3, 3, 3)]:
+		v[p + Vector3i(0, 1, 0)] = Color("d93a3a")
+	v[Vector3i(2, 4, 0)] = Color("6b6b6b")
+	v[Vector3i(3, 4, 0)] = Color("6b6b6b")
+	return build_mesh(v, s, Vector3(3, 0, 2))
+
+
+static func workbench_mesh(s: float = 0.0625) -> ArrayMesh:
+	var v := {}
+	var glow := {}
+	var wood := Color("7a4e2c")
+	for x in 14:
+		for z in 7:
+			v[Vector3i(x, 7, z)] = jitter(wood.lightened(0.1), 0.06, hash3(Vector3i(x, 7, z)))
+			v[Vector3i(x, 8, z)] = jitter(wood, 0.06, hash3(Vector3i(x, 8, z)))
+	for lx in [0, 13]:
+		for lz in [0, 6]:
+			for y in 7:
+				v[Vector3i(lx, y, lz)] = wood.darkened(0.25)
+	# anvil
+	for x in range(3, 8):
+		for z in range(2, 5):
+			v[Vector3i(x, 9, z)] = Color("50545c")
+	for x in range(2, 9):
+		for z in range(2, 5):
+			v[Vector3i(x, 10, z)] = Color("6a6f78")
+	v[Vector3i(1, 10, 3)] = Color("6a6f78")
+	# hammer and glowing parts tray
+	for x in range(9, 13):
+		v[Vector3i(x, 9, 1)] = Color("8a5a32")
+	v[Vector3i(12, 10, 1)] = Color("9aa0a8")
+	glow[Vector3i(10, 9, 4)] = Color("ffb347")
+	glow[Vector3i(11, 9, 5)] = Color("ff8c2a")
+	glow[Vector3i(11, 9, 4)] = Color("ffd166")
+	return build_mesh(v, s, Vector3(7, 0, 3.5), glow)
+
+
+static func medbay_mesh(s: float = 0.0625) -> ArrayMesh:
+	var v := {}
+	var glow := {}
+	for x in 8:
+		for z in 14:
+			v[Vector3i(x, 3, z)] = Color("dcd7cc") if z > 2 else Color("f2efe8")
+			if x == 0 or x == 7:
+				v[Vector3i(x, 2, z)] = Color("6b6f78")
+	for lx in [0, 7]:
+		for lz in [0, 13]:
+			for y in 3:
+				v[Vector3i(lx, y, lz)] = Color("6b6f78")
+	# a tall banner with a red cross
+	for y in range(0, 18):
+		v[Vector3i(-2, y, 0)] = Color("6b6f78")
+	for x in range(-1, 5):
+		for y in range(11, 18):
+			v[Vector3i(x, y, 0)] = Color("f2efe8")
+	for p in [Vector3i(1, 14, 0), Vector3i(2, 14, 0), Vector3i(1, 13, 0), Vector3i(2, 13, 0), Vector3i(1, 15, 0), Vector3i(2, 15, 0), Vector3i(0, 14, 0), Vector3i(3, 14, 0), Vector3i(1, 16, 0), Vector3i(1, 12, 0), Vector3i(2, 12, 0), Vector3i(2, 16, 0), Vector3i(0, 13, 0), Vector3i(3, 13, 0)]:
+		v[p + Vector3i(0, 0, -1)] = Color("d93a3a")
+	glow[Vector3i(5, 4, 1)] = Color("6dffa8")
+	glow[Vector3i(5, 5, 1)] = Color("b8ffd6")
+	return build_mesh(v, s, Vector3(4, 0, 7), glow)
+
+
+static func torch_rack_mesh(s: float = 0.0625) -> ArrayMesh:
+	var v := {}
+	var glow := {}
+	var wood := Color("6b4423")
+	for x in 12:
+		v[Vector3i(x, 0, 0)] = wood.darkened(0.2)
+		v[Vector3i(x, 9, 0)] = wood
+		v[Vector3i(x, 4, 0)] = wood.lightened(0.1)
+	for y in 10:
+		v[Vector3i(0, y, 0)] = wood
+		v[Vector3i(11, y, 0)] = wood
+	for i in 4:
+		var x := 2 + i * 3
+		for y in range(1, 8):
+			v[Vector3i(x, y, 1)] = Color("7a5232")
+		glow[Vector3i(x, 8, 1)] = Color("ffb347")
+		glow[Vector3i(x, 9, 1)] = Color("ffe08a")
+	return build_mesh(v, s, Vector3(6, 0, 0.5), glow)

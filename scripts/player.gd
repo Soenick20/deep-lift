@@ -2,6 +2,8 @@ extends Node3D
 
 const VK = preload("res://scripts/voxel_kit.gd")
 const Level = preload("res://scripts/level.gd")
+const Loot = preload("res://scripts/loot.gd")
+const PACK_SLOTS := 2
 
 const SPEED := 4.2
 const CARRY_SPEED_MUL := 0.5
@@ -32,6 +34,10 @@ var moving := false
 
 var cls := ""
 var gun := "pistol"
+var weapon: Dictionary = {}
+var pack: Array = []
+var gun_node: MeshInstance3D
+static var _gun_meshes := {}
 var dig_mul := 1.0
 var gear: MeshInstance3D
 
@@ -60,6 +66,11 @@ func setup(g, inp, i: int, col: Color) -> void:
 		mi.position = p[pname].pivot
 		model.add_child(mi)
 		parts[pname] = mi
+	gun_node = MeshInstance3D.new()
+	gun_node.position = Vector3(0, -0.29, 0.03)
+	gun_node.rotation.x = PI / 2.0
+	parts.arm_r.add_child(gun_node)
+	equip(Loot.make("Pistol", 0))
 	carry_anchor = Node3D.new()
 	carry_anchor.position = Vector3(0, 1.12, 0.05)
 	model.add_child(carry_anchor)
@@ -135,13 +146,21 @@ func update(delta: float) -> void:
 	# shoot
 	if input.shoot and not carrying and shoot_cd <= 0.0:
 		var muzzle := global_position + Vector3(0, 0.62, 0) + aim * 0.45
-		if gun == "shotgun":
-			shoot_cd = 0.5
-			for k in [-0.16, 0.0, 0.16]:
-				game.spawn_bullet(muzzle, aim.rotated(Vector3.UP, k + randf_range(-0.03, 0.03)), self, 0.38)
-		else:
-			shoot_cd = SHOOT_COOLDOWN
-			game.spawn_bullet(muzzle, aim, self)
+		var w := weapon
+		shoot_cd = w.cd
+		var n: int = w.pellets
+		for k in n:
+			var off: float = 0.0 if n == 1 else lerpf(-w.spread * 0.5, w.spread * 0.5, float(k) / (n - 1))
+			if n == 1:
+				off = randf_range(-w.spread * 0.5, w.spread * 0.5)
+			game.spawn_bullet(muzzle, aim.rotated(Vector3.UP, off + randf_range(-0.03, 0.03)), self, w.life, w, k == 0)
+
+	# swap weapons
+	if input.swap_pressed and not carrying and pack.size() > 0:
+		var next: Dictionary = pack.pop_front()
+		pack.append(weapon)
+		equip(next)
+		game.show_message("P%d: %s" % [index + 1, Loot.name_of(weapon)], 1.0)
 
 	# dig
 	_update_dig(delta)
@@ -261,6 +280,9 @@ func hurt(n: int) -> void:
 		revive_progress = 0.0
 		if carrying:
 			game.drop_shard(self)
+		if ore > 0:
+			game.drop_ore(global_position, ore)
+			ore = 0
 
 
 func revive() -> void:
@@ -286,7 +308,9 @@ func _animate(delta: float) -> void:
 	else:
 		parts.arm_l.rotation.x = -sw * 0.8
 		if not (input.dig and dig_marker.visible):
-			parts.arm_r.rotation.x = -1.4 if shoot_cd > 0.1 else sw * 0.8
+			# hold the gun up and forward, with a little kick after each shot
+			var kick: float = clampf(shoot_cd / maxf(weapon.get("cd", 0.3), 0.05), 0.0, 1.0)
+			parts.arm_r.rotation.x = -1.35 + kick * 0.35
 	model.position.y = absf(sin(walk_t)) * 0.04 if moving else 0.0
 	var flash := hurt_flash > 0.0 and int(hurt_flash * 30.0) % 2 == 0
 	model.visible = not flash
@@ -305,6 +329,8 @@ func set_class(c: String) -> void:
 	match c:
 		"Bodyguard":
 			gun = "shotgun"
+			if weapon.get("type", "") != "Shotgun":
+				equip(Loot.make("Shotgun", 0))
 		"Architect":
 			dig_mul = 2.2
 		"Artificer":
@@ -320,6 +346,27 @@ func clear_class() -> void:
 	cls = ""
 	gun = "pistol"
 	dig_mul = 1.0
+	pack.clear()
+	equip(Loot.make("Pistol", 0))
 	if gear:
 		gear.queue_free()
 		gear = null
+
+
+func equip(w: Dictionary) -> void:
+	weapon = w
+	var key := "%s-%d" % [w.type, w.rarity]
+	if not _gun_meshes.has(key):
+		_gun_meshes[key] = VK.gun_mesh(w.type, Loot.color_of(w))
+	gun_node.mesh = _gun_meshes[key]
+
+
+# Picking up a gun equips it; the old one goes to the backpack, or onto the floor if the pack is full.
+# Returns the weapon that was dropped, or an empty Dictionary.
+func take_weapon(w: Dictionary) -> Dictionary:
+	var old := weapon
+	equip(w)
+	if pack.size() < PACK_SLOTS:
+		pack.append(old)
+		return {}
+	return old
