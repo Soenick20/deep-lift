@@ -48,6 +48,22 @@ the screen and the controls you need at the bottom. Press **Tab** (or **Back** o
 
 Players who join after the class step get a role automatically.
 
+## The run: a branching map
+
+Each depth is a map of about 7 floors, shown in the top-right corner. You start on a Mine,
+pick a path through a few layers of choices, and the depth ends with a boss.
+
+- **Choosing:** after the hold, the lift lights one pad per path. Everyone stands on the
+  same pad for a moment, and the lift blinks there. The descriptions show at the bottom of the screen.
+- **Mine:** the normal floor.
+- **Vault:** a smaller cave with 3 locked caches next to the shard and more guards. The threat meter fills faster.
+- **Mini-boss:** a Brute guards the heartshard in an arena, and the shard is caged until it
+  dies. It drops a good gun and plenty of ore.
+- **Depth boss:** the Hollow Mother, bigger and tougher, keeps calling crawlers to her side.
+  Beat her and feed the lift to start the next depth with a new map.
+
+Difficulty, monster health and loot rarity rise with every floor.
+
 ## Loot
 
 - **Guns:** Pistol, Shotgun, SMG and Rifle, each in **Common** (white), **Rare** (blue) or **Epic**
@@ -112,6 +128,7 @@ If everyone is down, the run ends; press Interact to dive again.
 - `scripts/player.gd`, `scripts/player_input.gd`: player actions, animation, input devices
 - `scripts/crawler.gd`: the monster (sleep, investigate noise, chase, attack)
 - `scripts/loot.gd`: weapon types, rarities, stat rolls and loot odds
+- `scripts/run_map.gd`, `scripts/map_panel.gd`: the branching map for each depth and its on-screen panel
 - `scripts/voxel_kit.gd`: builds all models from voxels
 - `screenshots/`: images rendered from this build
 
@@ -119,8 +136,9 @@ If everyone is down, the run ends; press Interact to dive again.
 
 Run the automated play-through (no window). It plays the whole prologue (move, pick classes,
 gate opens, chop the trail, wake and clear the critters, find the heartstone, feed the tower,
-first jump), then a mine floor (sealed shard room, dig in, kill a crawler, wake one with noise,
-carry and feed the shard, blink to depth 2), then revive, game over and restart:
+first jump), then loot (crates, pickups, swapping, the stash and stations), then a mine floor
+(sealed shard room, dig in, kill a crawler, wake one with noise, carry and feed the shard, vote on
+a path), a Mini-boss floor, a Vault floor, beating the depth boss, then revive, game over and restart:
 
 ```bash
 godot --headless --path . -- --autotest
@@ -140,5 +158,5 @@ godot --path . -- --shot=/full/path/to/screenshots
 
 ## Not in this prototype yet
 
-Sound, class abilities beyond the tent upgrades, the branching map with Vault and Mini-boss
-floors, more monster types, and menus. Those are Phase 2 and later in the design doc.
+Sound, class abilities beyond the tent upgrades, Rest/Trader floors, more monster types,
+a second biome (crystal caves), and menus. Those are Phase 2 and later in the design doc.

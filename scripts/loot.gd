@@ -50,9 +50,9 @@ static func dps(w: Dictionary) -> float:
 
 # Rarity odds get better with depth; bonus shifts odds further (hidden pockets, tough monsters).
 static func roll_rarity(rng: RandomNumberGenerator, depth: int, bonus: float = 0.0) -> int:
-	var common := maxf(70.0 - depth * 8.0 - bonus, 10.0)
-	var rare := 25.0 + depth * 5.0 + bonus * 0.6
-	var epic := 5.0 + depth * 3.0 + bonus * 0.4
+	var common := maxf(72.0 - depth * 4.0 - bonus, 8.0)
+	var rare := 24.0 + depth * 2.5 + bonus * 0.6
+	var epic := 4.0 + depth * 1.5 + bonus * 0.4
 	var r := rng.randf() * (common + rare + epic)
 	if r < common:
 		return 0

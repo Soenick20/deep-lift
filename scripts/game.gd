@@ -9,8 +9,10 @@ const CrawlerScript = preload("res://scripts/crawler.gd")
 const PlayerInput = preload("res://scripts/player_input.gd")
 const PrologueScript = preload("res://scripts/prologue.gd")
 const Loot = preload("res://scripts/loot.gd")
+const RunMap = preload("res://scripts/run_map.gd")
+const MapPanel = preload("res://scripts/map_panel.gd")
 
-enum { EXPLORE, CHARGING, BLINK, GAMEOVER }
+enum { EXPLORE, CHARGING, BLINK, GAMEOVER, CHOOSE }
 
 const PLAYER_COLORS := [Color("3f9a4f"), Color("3a6fd0"), Color("d9822b"), Color("9a55d6")]
 const CHARGE_TIME := 20.0
@@ -77,6 +79,20 @@ var bank_ore := 0
 var loot_rng := RandomNumberGenerator.new()
 var stash_label: Label
 var _banked_msg := 0
+var run_map = RunMap.new()
+var act := 1
+var floor_type := "mine"
+var map_panel: Control
+var pads: Array = []          # [{node, label, opt, pos}]
+var choose_opts: Array = []
+var choose_hold := 0.0
+var pending: Dictionary = {}
+var shard_locked := false
+var cage: Node3D
+var boss_ref = null
+var boss_box: VBoxContainer
+var boss_label: Label
+var boss_bar: ProgressBar
 var env: Environment
 var mode := "mine"
 var prologue = null
@@ -200,6 +216,34 @@ func _setup_hud() -> void:
 	stash_label.position = Vector2(-330, 82)
 	stash_label.size = Vector2(300, 30)
 	root.add_child(stash_label)
+	map_panel = MapPanel.new()
+	map_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	map_panel.position = Vector2(-390, 120)
+	map_panel.size = Vector2(370, 150)
+	map_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	map_panel.run_map = run_map
+	root.add_child(map_panel)
+	boss_box = VBoxContainer.new()
+	boss_box.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	boss_box.position = Vector2(-260, 84)
+	boss_box.size = Vector2(520, 50)
+	root.add_child(boss_box)
+	boss_label = _label(20, Color("ffb3a6"))
+	boss_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	boss_box.add_child(boss_label)
+	boss_bar = ProgressBar.new()
+	boss_bar.custom_minimum_size = Vector2(520, 16)
+	boss_bar.show_percentage = false
+	var bbg := StyleBoxFlat.new()
+	bbg.bg_color = Color(0.1, 0.05, 0.08, 0.85)
+	bbg.set_corner_radius_all(5)
+	var bfg := StyleBoxFlat.new()
+	bfg.bg_color = Color("c0392b")
+	bfg.set_corner_radius_all(5)
+	boss_bar.add_theme_stylebox_override("background", bbg)
+	boss_bar.add_theme_stylebox_override("fill", bfg)
+	boss_box.add_child(boss_bar)
+	boss_box.visible = false
 
 	var pbox := VBoxContainer.new()
 	pbox.position = Vector2(20, 100)
@@ -287,6 +331,27 @@ func _build_shard() -> void:
 	shard_light.position = Vector3(0, 0.4, 0)
 	shard.add_child(shard_light)
 	add_child(shard)
+	cage = Node3D.new()
+	var bar_mesh := VK.box_mesh(Vector3(0.05, 1.1, 0.05), Color("ff6a3d"), true)
+	for i in 6:
+		var a := TAU * i / 6.0
+		var b := MeshInstance3D.new()
+		b.mesh = bar_mesh
+		b.position = Vector3(cos(a) * 0.38, 0.55, sin(a) * 0.38)
+		cage.add_child(b)
+	var edge_x := VK.box_mesh(Vector3(0.8, 0.04, 0.04), Color("ff6a3d"), true)
+	var edge_z := VK.box_mesh(Vector3(0.04, 0.04, 0.8), Color("ff6a3d"), true)
+	for sgn in [-1.0, 1.0]:
+		var ex := MeshInstance3D.new()
+		ex.mesh = edge_x
+		ex.position = Vector3(0, 1.1, sgn * 0.38)
+		cage.add_child(ex)
+		var ez := MeshInstance3D.new()
+		ez.mesh = edge_z
+		ez.position = Vector3(sgn * 0.38, 1.1, 0)
+		cage.add_child(ez)
+	cage.visible = false
+	add_child(cage)
 
 
 func _add_player(dev: String, joy: int):
@@ -317,7 +382,11 @@ func start_run() -> void:
 		p.ore = 0
 		p.downed = false
 		p.clear_class()
+	act = 1
+	run_map = RunMap.new()
+	map_panel.run_map = run_map
 	if skip_tutorial:
+		run_map.generate(loot_rng)
 		start_floor(1)
 		show_message("The old lift wakes in the dark.\nFind the heartshard and bring it home.", 4.0)
 	else:
@@ -341,6 +410,10 @@ func _clear_floor_objects() -> void:
 	for cr in crates:
 		cr.node.queue_free()
 	crates.clear()
+	_clear_pads()
+	shard_locked = false
+	cage.visible = false
+	boss_ref = null
 	if shard.get_parent() != self:
 		shard.reparent(self)
 	shard_fed = false
@@ -385,8 +458,11 @@ func is_blinking() -> bool:
 	return state == BLINK
 
 
-func start_floor(d: int) -> void:
+func start_floor(d: int, ftype: String = "mine") -> void:
 	depth = d
+	floor_type = ftype
+	if run_map.layers.is_empty():
+		run_map.generate(loot_rng)
 	mode = "mine"
 	if prologue:
 		prologue.cleanup()
@@ -399,7 +475,7 @@ func start_floor(d: int) -> void:
 		if players[i].cls == "":
 			players[i].set_class(CLASSES[i % 3])
 	var t_gen := Time.get_ticks_msec()
-	level.generate(run_seed + d * 7919, d)
+	level.generate(run_seed + d * 7919, d, ftype)
 	print("depth %d generated in %d ms" % [d, Time.get_ticks_msec() - t_gen])
 	lift_pos = level.cell_to_world(level.lift_cell)
 	lift_root.position = lift_pos
@@ -422,6 +498,11 @@ func start_floor(d: int) -> void:
 	stations_root.visible = true
 	for sp in level.crate_spots:
 		_spawn_crate(sp.cell, sp.pocket)
+	if ftype == "miniboss" or ftype == "boss":
+		boss_ref = _spawn_crawler(level.cell_to_world(level.boss_spot), false, "brute" if ftype == "miniboss" else "boss")
+		shard_locked = true
+		cage.visible = true
+		cage.global_position = Vector3(shard.global_position.x, 0, shard.global_position.z)
 	# players onto the platform
 	for i in players.size():
 		var p = players[i]
@@ -509,34 +590,45 @@ func _update_state(delta: float) -> void:
 	match state:
 		EXPLORE:
 			if mode == "mine":
-				threat += delta * (0.45 + 0.1 * depth)
+				threat += delta * (0.45 + 0.06 * depth) * (1.35 if floor_type == "vault" else 1.0)
 			if threat >= 100.0:
 				threat = 30.0
-				_spawn_swarm(3 + depth, 20, 60)
+				_spawn_swarm(3 + depth / 2, 20, 60)
 				show_message("The dark stirs... something is coming.", 2.5)
 		CHARGING:
 			charge_left -= delta
 			swarm_t -= delta
 			heart_light.light_energy = 2.5 + sin(Time.get_ticks_msec() * 0.01) * 0.8
 			if swarm_t <= 0.0:
-				swarm_t = maxf(0.8, 2.0 - depth * 0.15)
-				_spawn_swarm(1 + (1 if randf() < 0.25 * depth else 0), 22, 50)
+				swarm_t = maxf(0.8, 2.0 - depth * 0.08)
+				_spawn_swarm(1 + (1 if randf() < 0.12 * depth else 0), 22, 50)
 			if charge_left <= 0.0:
-				state = BLINK
-				blink_t = 0.0
-				blink_done = false
+				_after_charge()
+		CHOOSE:
+			_update_choose(delta)
 		BLINK:
 			blink_t += delta
 			flash_rect.color.a = clampf(1.0 - absf(blink_t - 0.45) / 0.45, 0, 1) if blink_t < 0.9 else maxf(0.0, 1.0 - (blink_t - 0.9) * 1.5)
 			if blink_t >= 0.45 and not blink_done:
 				blink_done = true
 				var from_surface := mode == "surface"
-				start_floor(depth + 1)
+				if pending.has("opt"):
+					run_map.advance(pending.opt)
+					start_floor(depth + 1, run_map.current_type())
+				else:
+					if not from_surface:
+						act += 1
+					run_map.generate(loot_rng)
+					start_floor(depth + 1, "mine")
 				state = BLINK
+				var info: Dictionary = RunMap.INFO[floor_type]
 				if from_surface:
 					show_message("BLINK!\nThe creature dives into the deep. Depth 1: the mines.", 4.0)
+				elif not pending.has("opt"):
+					show_message("BLINK!  The creature dives deeper.\nDEPTH %d begins." % act, 3.5)
 				else:
-					show_message("BLINK!  Depth %d" % depth, 2.5)
+					show_message("BLINK!  %s\n%s" % [info.name, info.desc], 3.0)
+				pending = {}
 			if blink_t >= 1.6:
 				flash_rect.color.a = 0.0
 				state = EXPLORE
@@ -577,6 +669,9 @@ func feed(p) -> void:
 
 
 func pick_up(p) -> void:
+	if shard_locked:
+		show_message("The %s guards the heartshard. Defeat it first!" % ("Brute" if floor_type == "miniboss" else "Hollow Mother"), 2.0)
+		return
 	shard_carrier = p
 	p.carrying = true
 	shard.reparent(p.carry_anchor)
@@ -597,7 +692,7 @@ func drop_shard(p) -> void:
 
 
 func player_interact(p) -> void:
-	if state == GAMEOVER or state == BLINK:
+	if state == GAMEOVER or state == BLINK or state == CHOOSE:
 		return
 	if prologue and prologue.try_interact(p):
 		return
@@ -963,12 +1058,26 @@ func show_message(text: String, seconds: float) -> void:
 func _update_hud(delta: float) -> void:
 	message_t -= delta
 	message_label.modulate.a = clampf(message_t / 0.5, 0.0, 1.0)
-	depth_label.text = "PROLOGUE  -  THE FIRST NIGHT" if mode == "surface" else "DEPTH %d" % depth
+	if mode == "surface":
+		depth_label.text = "PROLOGUE  -  THE FIRST NIGHT"
+	else:
+		depth_label.text = "DEPTH %d  -  FLOOR %d/%d  -  %s" % [act, run_map.floor_number(), run_map.floor_count(), RunMap.INFO[floor_type].name]
+	map_panel.visible = mode == "mine" and not run_map.layers.is_empty()
+	map_panel.title = "DEPTH %d MAP" % act
+	map_panel.choices = choose_opts if state == CHOOSE else []
+	map_panel.queue_redraw()
+	var show_boss: bool = boss_ref != null and is_instance_valid(boss_ref) and boss_ref.is_alive()
+	boss_box.visible = show_boss
+	if show_boss:
+		boss_label.text = "THE BRUTE" if boss_ref.kind == "brute" else "THE HOLLOW MOTHER"
+		boss_bar.value = boss_ref.hp / boss_ref.max_hp * 100.0
 	threat_bar.get_parent().visible = mode == "mine" or state == CHARGING
 	match state:
 		EXPLORE:
 			if prologue:
 				objective_label.text = prologue.objective()
+			elif shard_locked:
+				objective_label.text = "Defeat the %s guarding the heartshard" % ("Brute" if floor_type == "miniboss" else "Hollow Mother")
 			elif shard_carrier != null:
 				objective_label.text = "Carry the heartshard back to the lift"
 			else:
@@ -981,6 +1090,10 @@ func _update_hud(delta: float) -> void:
 			threat_bar.value = (1.0 - charge_left / (12.0 if prologue else CHARGE_TIME)) * 100.0
 		BLINK:
 			objective_label.text = ""
+		CHOOSE:
+			objective_label.text = "Choose the next jump: everyone stand on the same pad"
+			threat_label.text = "CHOOSE A PATH"
+			threat_bar.value = choose_hold / 1.2 * 100.0
 		GAMEOVER:
 			objective_label.text = "Run over"
 	stash_label.visible = mode == "mine"
@@ -999,7 +1112,12 @@ func _update_hud(delta: float) -> void:
 		else:
 			l.text = ""
 	var joinable := players.size() < 4
-	if prologue:
+	if state == CHOOSE:
+		var parts: Array = []
+		for pd in pads:
+			parts.append("%s: %s" % [pd.name, pd.desc])
+		hint_label.text = "     ".join(parts) + "\nStand together on one pad for a moment to jump there."
+	elif prologue:
 		hint_label.text = prologue.hint() + "\nTab / Back: skip the tutorial"
 	else:
 		hint_label.text = "P1: WASD move, mouse aim, LMB shoot, RMB dig, E interact, Q torch, R swap gun   |   Controller: sticks, RT shoot, LT dig, A interact, Y torch, B swap"
@@ -1248,12 +1366,83 @@ func _run_autotest() -> void:
 	print("feed ok")
 	charge_left = 0.5
 	var t0 := Time.get_ticks_msec()
-	while depth < 2 and Time.get_ticks_msec() - t0 < 5000:
+	while state == CHARGING and Time.get_ticks_msec() - t0 < 5000:
+		await get_tree().process_frame
+	var want: Array = []
+	if state == CHOOSE:
+		if pads.size() != run_map.options().size() or pads.size() < 2:
+			return _fail("expected one pad per path, got %d pads" % pads.size())
+		want = pads[pads.size() - 1].opt
+		for p in players:
+			p.position = pads[pads.size() - 1].node.global_position
+	while depth < 2 and Time.get_ticks_msec() - t0 < 9000:
 		await get_tree().process_frame
 	await get_tree().create_timer(2.2).timeout
+	if not want.is_empty():
+		if run_map.cur_layer != want[0] or run_map.cur_index != want[1]:
+			return _fail("the vote did not pick the chosen path")
+		print("vote ok: picked %s" % RunMap.INFO[run_map.type_of(want)].name)
 	if depth != 2 or state != EXPLORE:
 		return _fail("blink to depth 2 failed (depth=%d state=%d)" % [depth, state])
-	print("blink ok: depth 2, crawlers=%d" % crawlers.size())
+	print("blink ok: floor 2 (%s), crawlers=%d" % [floor_type, crawlers.size()])
+
+	# mini-boss floor: the shard is caged until the Brute dies
+	start_floor(depth + 1, "miniboss")
+	await _frames(3)
+	if boss_ref == null or boss_ref.kind != "brute" or not shard_locked:
+		return _fail("mini-boss floor has no Brute or the shard is not caged")
+	p1.position = shard.global_position + Vector3(0.4, 0, 0)
+	p1.position.y = 0
+	player_interact(p1)
+	if p1.carrying:
+		return _fail("picked up a caged shard")
+	var n_pick := pickups.size()
+	boss_ref.hit(9999.0, Vector3.FORWARD)
+	await _frames(3)
+	if shard_locked or pickups.size() < n_pick + 2:
+		return _fail("killing the Brute did not free the shard or drop loot")
+	player_interact(p1)
+	if not p1.carrying:
+		return _fail("could not pick up the freed shard")
+	print("mini-boss ok")
+
+	# vault floor: locked caches around the shard
+	start_floor(depth + 1, "vault")
+	await _frames(3)
+	var near_caches := 0
+	for vc in crates:
+		if vc.pocket and vc.node.global_position.distance_to(shard.global_position) < 5.0:
+			near_caches += 1
+	if near_caches < 3:
+		return _fail("vault should have 3 caches by the shard, found %d" % near_caches)
+	print("vault ok")
+
+	# boss floor finished: the next blink starts a new depth with a new map
+	run_map.cur_layer = run_map.layers.size() - 1
+	run_map.cur_index = 0
+	start_floor(depth + 1, "boss")
+	await _frames(3)
+	if boss_ref == null or boss_ref.kind != "boss":
+		return _fail("boss floor has no boss")
+	boss_ref.hit(99999.0, Vector3.FORWARD)
+	await _frames(3)
+	for p in players:
+		p.downed = false
+	p1.position = shard.global_position + Vector3(0.4, 0, 0)
+	p1.position.y = 0
+	player_interact(p1)
+	p1.position = lift_pos + Vector3(0.5, 0.25, 0.4)
+	player_interact(p1)
+	if state != CHARGING:
+		return _fail("could not feed after the boss")
+	var act_before := act
+	charge_left = 0.2
+	var tb := Time.get_ticks_msec()
+	while (act == act_before or state != EXPLORE) and Time.get_ticks_msec() - tb < 6000:
+		await get_tree().process_frame
+	if act != act_before + 1 or run_map.cur_layer != 0 or floor_type != "mine":
+		return _fail("beating the boss did not start the next depth")
+	print("boss ok: depth %d begins" % act)
 
 	# revive
 	p2.hurt(10)
@@ -1537,6 +1726,68 @@ func _run_screenshots() -> void:
 	await _shot("10-lift-stations.png")
 	message_t = 0.0
 
+	# 11: choosing the next jump on the lift's pads, with the depth map
+	var first: Array = run_map.layers[1]
+	var demo_types := ["mine", "vault", "miniboss"]
+	for i in first.size():
+		first[i].type = demo_types[i % 3]
+	_start_choose(run_map.options())
+	await _frames(2)
+	players[0].position = pads[0].node.global_position + Vector3(0.1, 0, 0.05)
+	players[1].position = pads[0].node.global_position + Vector3(-0.15, 0, -0.1)
+	players[2].position = pads[pads.size() - 1].node.global_position + Vector3(0.0, 0, 0.1)
+	for p in players:
+		p.facing = Vector3(0, 0, 1)
+	_center_cam()
+	cam_target = lift_pos + Vector3(0, 0, -0.2)
+	show_message("The lift senses %d heartshards.\nEveryone: stand on the same pad to pick the next jump." % pads.size(), 99.0)
+	await _frames(30)
+	await _shot("11-choose-next-jump.png")
+	_clear_pads()
+	state = EXPLORE
+	message_t = 0.0
+
+	# 12: a mini-boss floor: the Brute guards the caged heartshard
+	start_floor(depth + 1, "miniboss")
+	await _frames(5)
+	var bpos: Vector3 = boss_ref.global_position
+	var sp: Vector3 = shard.global_position
+	var away := (bpos - sp)
+	away.y = 0
+	away = away.normalized() if away.length() > 0.1 else Vector3(0, 0, 1)
+	var used: Array = []
+	for i in 3:
+		var placed := false
+		for tries in 60:
+			var ang := atan2(away.z, away.x) + (i - 1) * 0.55 + randf_range(-0.25, 0.25)
+			var cand: Vector3 = bpos + Vector3(cos(ang), 0, sin(ang)) * randf_range(2.0, 3.0)
+			var clash := false
+			for u in used:
+				if u.distance_to(cand) < 0.7:
+					clash = true
+			if level.can_occupy(cand, 0.26) and not clash:
+				players[i].position = cand
+				used.append(cand)
+				placed = true
+				break
+		if not placed:
+			players[i].position = bpos + away * 2.2 + Vector3(i * 0.6 - 0.6, 0, 0)
+		players[i].facing = (bpos - players[i].position).normalized()
+	players[1].input.shoot = true
+	players[0].equip(Loot.make("Shotgun", 1, loot_rng))
+	players[2].equip(Loot.make("Rifle", 2, loot_rng))
+	boss_ref.state = CrawlerScript.CHASE
+	boss_ref.zzz.visible = false
+	boss_ref.hp = boss_ref.max_hp * 0.8
+	place_torch(sp + Vector3(1.0, 0, 1.0))
+	_center_cam()
+	cam_target = (bpos + players[1].position) * 0.5
+	message_t = 0.0
+	await _frames(14)
+	await _shot("12-mini-boss.png")
+	for p in players:
+		p.input.shoot = false
+
 	# 9: the team leaving the lift into the caves, a little further out
 	for i in 3:
 		players[i].position = lift_pos + Vector3(-0.8 + i * 0.8, 0.25, -0.4)
@@ -1549,7 +1800,7 @@ func _run_screenshots() -> void:
 	camera.position = cam_target + Vector3(0, sin(deg_to_rad(63.0)), cos(deg_to_rad(63.0))) * 17.0
 	camera.look_at(cam_target, Vector3.UP)
 	await _frames(20)
-	await _shot("11-cave-overview.png")
+	await _shot("13-cave-overview.png")
 	get_tree().quit(0)
 
 
@@ -1665,6 +1916,18 @@ func drop_ore(pos: Vector3, n: int) -> void:
 
 
 func on_crawler_killed(c) -> void:
+	if mode == "mine" and c.is_heavy():
+		var big: bool = c.kind == "boss"
+		_spawn_pickup("gun", c.global_position + Vector3(0.3, 0, 0), Loot.roll_weapon(loot_rng, depth, 60.0 if big else 40.0))
+		_spawn_pickup("ore", c.global_position + Vector3(-0.3, 0, 0.2), loot_rng.randi_range(8, 12) if big else loot_rng.randi_range(5, 8))
+		if big:
+			_spawn_pickup("gun", c.global_position + Vector3(0, 0, -0.4), Loot.roll_weapon(loot_rng, depth, 60.0))
+		debris(c.global_position + Vector3(0, 0.5, 0), Color("ffcc33"), 20)
+		if c == boss_ref:
+			shard_locked = false
+			cage.visible = false
+			show_message("%s is down!\nThe heartshard is free." % ("The Brute" if not big else "The Hollow Mother"), 3.0)
+		return
 	if mode != "mine" or c.kind != "crawler":
 		return
 	var r := loot_rng.randf()
@@ -1836,3 +2099,114 @@ func _update_loot(delta: float) -> void:
 	if stored > 0:
 		debris(lift_pos + Vector3(0, 0.8, 0), Color("7ef6ff"), 6)
 		show_message("+%d ore stored in the lift" % stored, 1.5)
+
+
+
+# ================================================================== the branching map
+func _after_charge() -> void:
+	pending = {}
+	if mode == "mine" and not run_map.at_boss():
+		var opts: Array = run_map.options()
+		if opts.size() > 1:
+			_start_choose(opts)
+			return
+		if opts.size() == 1:
+			pending = {"opt": opts[0]}
+	state = BLINK
+	blink_t = 0.0
+	blink_done = false
+
+
+func _start_choose(opts: Array) -> void:
+	state = CHOOSE
+	choose_opts = opts
+	choose_hold = 0.0
+	# the lift's pulse shatters what is left of the swarm and lifts everyone back up
+	for c in crawlers:
+		if is_instance_valid(c) and c.is_alive():
+			debris(c.global_position + Vector3(0, 0.3, 0), Color("7ef6ff"), 6)
+			c.queue_free()
+	crawlers.clear()
+	for p in players:
+		if p.downed:
+			p.revive()
+	_clear_pads()
+	var n := opts.size()
+	for i in n:
+		var t: String = run_map.type_of(opts[i])
+		var info: Dictionary = RunMap.INFO[t]
+		var col: Color = info.color
+		var local := Vector3((i - (n - 1) / 2.0) * 1.1, 0.27, -0.75)
+		var node := Node3D.new()
+		var disc := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.42
+		cm.bottom_radius = 0.42
+		cm.height = 0.03
+		cm.radial_segments = 24
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = Color(col.r, col.g, col.b, 0.55)
+		cm.material = mat
+		disc.mesh = cm
+		node.add_child(disc)
+		var beam := MeshInstance3D.new()
+		beam.mesh = VK.box_mesh(Vector3(0.06, 1.6, 0.06), col, true)
+		beam.position = Vector3(0, 0.8, 0)
+		node.add_child(beam)
+		var lab := Label3D.new()
+		lab.font_size = 34
+		lab.outline_size = 10
+		lab.pixel_size = 0.006
+		lab.modulate = col.lightened(0.2)
+		lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lab.no_depth_test = true
+		lab.position = Vector3(0, 1.75 + (i % 2) * 0.45, 0)
+		node.add_child(lab)
+		var light := OmniLight3D.new()
+		light.light_color = col
+		light.light_energy = 1.0
+		light.omni_range = 2.0
+		light.position = Vector3(0, 0.5, 0)
+		node.add_child(light)
+		lift_root.add_child(node)
+		node.position = local
+		pads.append({"node": node, "label": lab, "opt": opts[i], "mat": mat, "col": col, "name": "%d  %s" % [i + 1, info.name], "desc": info.desc})
+	show_message("The lift senses %d heartshards.\nEveryone: stand on the same pad to pick the next jump." % n, 4.0)
+
+
+func _clear_pads() -> void:
+	for pd in pads:
+		pd.node.queue_free()
+	pads.clear()
+	choose_opts = []
+
+
+func _update_choose(delta: float) -> void:
+	var alive: Array = players.filter(func(p): return not p.downed)
+	var chosen := -1
+	for i in pads.size():
+		var pd: Dictionary = pads[i]
+		var wp: Vector3 = pd.node.global_position
+		var votes := 0
+		for p in alive:
+			if _flat_dist(p.global_position, wp) < 0.5:
+				votes += 1
+		if votes == alive.size() and votes > 0:
+			chosen = i
+		pd.label.text = "%s\n%d/%d" % [pd.name, votes, alive.size()]
+		var pulse := 0.55 + (0.3 * sin(Time.get_ticks_msec() * 0.012) if votes > 0 else 0.0)
+		pd.mat.albedo_color = Color(pd.col.r, pd.col.g, pd.col.b, pulse)
+	if chosen < 0:
+		choose_hold = 0.0
+		return
+	choose_hold += delta
+	if choose_hold >= 1.2:
+		pending = {"opt": pads[chosen].opt}
+		_clear_pads()
+		state = BLINK
+		blink_t = 0.0
+		blink_done = false
+		var keep := pending
+		pending = keep

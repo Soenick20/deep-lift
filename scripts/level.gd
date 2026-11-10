@@ -51,6 +51,8 @@ var cave_noise := FastNoiseLite.new()
 var dirty_chunks := {}
 var crystal_nodes := {}              # ore cell -> crystal decor
 var last_uncovered := 0
+var floor_type := "mine"
+var boss_spot := Vector2i.ZERO
 var crate_spots: Array = []         # [{cell, pocket}]
 
 
@@ -173,8 +175,9 @@ func open_cells(cells: Array) -> void:
 
 
 # ------------------------------------------------------------------ generation
-func generate(seed_value: int, depth_value: int) -> void:
+func generate(seed_value: int, depth_value: int, ftype: String = "mine") -> void:
 	depth = depth_value
+	floor_type = ftype
 	mode = "mine"
 	rng.seed = seed_value
 	_clear_decor()
@@ -193,7 +196,7 @@ func generate(seed_value: int, depth_value: int) -> void:
 	lift_cell = Vector2i(rng.randi_range(18, W - 19), rng.randi_range(H - 17, H - 14))
 	rooms.append({"c": lift_cell, "r": 9.0, "kind": "lift"})
 	for i in 600:
-		if rooms.size() >= 12:
+		if rooms.size() >= (8 if ftype == "vault" else 12):
 			break
 		var r := rng.randf_range(4.0, 7.5)
 		var c := Vector2i(rng.randi_range(5 + int(r), W - 6 - int(r)), rng.randi_range(5 + int(r), H - 6 - int(r)))
@@ -211,7 +214,7 @@ func generate(seed_value: int, depth_value: int) -> void:
 		if Vector2(rooms[i].c).distance_to(Vector2(lift_cell)) > Vector2(rooms[far_i].c).distance_to(Vector2(lift_cell)):
 			far_i = i
 	rooms[far_i].kind = "shard"
-	rooms[far_i].r = maxf(rooms[far_i].r, 5.0)
+	rooms[far_i].r = maxf(rooms[far_i].r, 6.8 if (ftype == "miniboss" or ftype == "boss") else 5.0)
 	shard_room = rooms[far_i]
 	shard_cell = shard_room.c
 
@@ -290,8 +293,21 @@ func generate(seed_value: int, depth_value: int) -> void:
 		room.kind = "nest"
 		for j in rng.randi_range(2, 3) + (1 if depth >= 3 else 0):
 			nest_spots.append(_floor_near(room.c, room.r - 1.0))
-	for j in 2 + depth / 2:
+	var guards := 0
+	if ftype == "mine":
+		guards = 2 + depth / 3
+	elif ftype == "vault":
+		guards = 4 + depth / 3
+	for j in guards:
 		nest_spots.append(_floor_near(sc, sr - 1.5))
+	boss_spot = sc + Vector2i(0, 2)
+	if ftype == "vault":
+		for i in 3:
+			var a := TAU * i / 3.0 + 0.5
+			var vc := sc + Vector2i(roundi(cos(a) * (sr - 1.6)), roundi(sin(a) * (sr - 1.6)))
+			if not is_floor(vc):
+				vc = _floor_near(sc, sr - 1.5)
+			crate_spots.append({"cell": vc, "pocket": true})
 
 	# supply crates in ordinary rooms (never on the lift or in the shard room)
 	var crate_rooms: Array = rooms.filter(func(r): return r.kind == "room" or r.kind == "nest")
