@@ -23,6 +23,9 @@ var ore := 0
 var carrying := false
 var downed := false
 var revive_progress := 0.0
+var being_revived := false      # set each frame by a teammate holding Interact next to us
+var leave_t := 0.0              # how long the leave button has been held
+var leave_armed := false        # the leave button must be released once before it counts
 
 var facing := Vector3(0, 0, 1)
 var aim := Vector3(0, 0, 1)
@@ -217,12 +220,13 @@ func _update_dig(delta: float) -> void:
 		var was: int = lv.dig(target)
 		dig_progress = 0.0
 		# dig a little wider than one cell so the new tunnel fits a person
-		if (was == Level.DIRT or was == Level.ORE) and lv.mode == "mine":
+		# (a one-cell hole is 0.50 m wide and a player needs 0.52 m; hard rock counts too)
+		if (was == Level.DIRT or was == Level.ORE or was == Level.HARD) and lv.mode == "mine":
 			var perp := Vector3(-aim.z, 0, aim.x)
 			var side := 1.0 if (global_position - wp).dot(perp) > 0.0 else -1.0
 			var nb: Vector2i = lv.world_to_cell(wp + perp * side * Level.CELL)
 			var nt: int = lv.cell_at(nb)
-			if nt == Level.DIRT or nt == Level.ORE:
+			if nt == Level.DIRT or nt == Level.ORE or nt == Level.HARD:
 				lv.dig(nb)
 				if nt == Level.ORE:
 					ore += 1
@@ -245,22 +249,23 @@ func _update_dig(delta: float) -> void:
 
 
 func _update_revive_others(delta: float) -> void:
-	var reviving := false
-	if input.interact:
-		for o in game.players:
-			if o != self and o.downed and o.global_position.distance_to(global_position) < 1.3:
-				o.revive_progress += delta
-				reviving = true
-				if o.revive_progress >= REVIVE_TIME:
-					o.revive()
-				break
-	if not reviving:
-		for o in game.players:
-			if o.downed:
-				o.revive_progress = maxf(0.0, o.revive_progress - delta * 0.5)
+	if not input.interact:
+		return
+	for o in game.players:
+		if o != self and o.downed and o.global_position.distance_to(global_position) < 1.3:
+			o.revive_progress += delta
+			o.being_revived = true
+			if o.revive_progress >= REVIVE_TIME:
+				o.revive()
+			break
 
 
 func _update_downed(delta: float) -> void:
+	# The bar only drains when nobody is reviving us. The downed player does this for
+	# themselves, so bystanders no longer slow a revive down (or stop it with 4 players).
+	if not being_revived:
+		revive_progress = maxf(0.0, revive_progress - delta * 0.5)
+	being_revived = false
 	dig_marker.visible = false
 	model.rotation.x = lerpf(model.rotation.x, -PI / 2.0, clampf(delta * 8.0, 0, 1))
 	tag.text = "HELP! %d%%" % int(revive_progress / REVIVE_TIME * 100.0) if revive_progress > 0.0 else "HELP!"
@@ -323,6 +328,13 @@ const CLASS_INFO := {
 
 
 func set_class(c: String) -> void:
+	if c == cls:
+		return   # picking the same role again gives nothing extra
+	# hand back what the old role gave, so swapping tents can't stack bonuses
+	if cls == "Artificer":
+		torches = maxi(torches - 4, 0)
+	elif cls == "Bodyguard" and weapon.get("type", "") == "Shotgun" and weapon.get("rarity", 0) == 0:
+		equip(Loot.make("Pistol", 0))
 	cls = c
 	gun = "pistol"
 	dig_mul = 1.0

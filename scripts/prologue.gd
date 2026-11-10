@@ -119,7 +119,7 @@ func objective() -> String:
 func hint() -> String:
 	match step:
 		MOVE:
-			return "Move: WASD / left stick.   More players: press A on a controller, or arrow keys."
+			return "Move: WASD / left stick.   More players: press A on a controller, or Enter for a 2nd keyboard player."
 		CLASS:
 			return "Walk to a tent door and press Interact (E / A).  Bodyguard = shotgun.  Architect = fast drill.  Artificer = torches + crafting."
 		CHOP:

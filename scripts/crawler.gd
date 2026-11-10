@@ -10,6 +10,9 @@ const SPEED := 2.7
 const SIGHT := 8.0
 const ATTACK_RANGE := 0.75
 const ATTACK_COOLDOWN := 0.9
+# Crawlers get 6% faster per floor, up to this. At the cap a crawler runs 3.9 m/s against the
+# player's 4.2, so a crew can always just outrun one (uncapped, they overtook players at floor 10).
+const MAX_DEPTH_SPEED := 1.45
 
 var game
 var state := SLEEP
@@ -34,6 +37,7 @@ var speed_mul := 1.0
 var radius := RADIUS
 var damage := 1
 var attack_range := ATTACK_RANGE
+var hit_radius := 0.42          # how close a bullet must pass to hit; bigger bodies get more
 var summon_t := 5.0
 var max_hp := 3.0
 static var _meshes: Dictionary
@@ -61,12 +65,14 @@ func setup(g, pos: Vector3, awake: bool, k: String = "crawler") -> void:
 		hp = 16.0 + 3.0 * game.depth
 		speed_mul = 0.72
 		radius = 0.34
+		hit_radius = 0.6     # the Brute's body is about 1.1 m x 1.3 m
 		damage = 2
 		attack_range = 1.15
 	elif kind == "boss":
 		hp = 45.0 + 6.0 * game.depth
 		speed_mul = 0.62
 		radius = 0.42
+		hit_radius = 0.85    # the Hollow Mother's body is about 1.5 m x 1.8 m
 		damage = 2
 		attack_range = 1.45
 	else:
@@ -217,7 +223,7 @@ func _follow_to(goal: Vector3, delta: float, speed_mul: float) -> void:
 	to.y = 0
 	if to.length() < 0.05:
 		return
-	var spd: float = SPEED * speed_mul * self.speed_mul * (1.0 + 0.06 * game.depth)
+	var spd: float = run_speed() * speed_mul
 	if game.in_torchlight(global_position):
 		spd *= 0.55
 	game.move_entity(self, to.normalized() * spd * delta, radius, false)
@@ -225,6 +231,11 @@ func _follow_to(goal: Vector3, delta: float, speed_mul: float) -> void:
 	var step := sin(anim_t * 18.0) * 0.03
 	legs_a.position.y = maxf(step, 0.0)
 	legs_b.position.y = maxf(-step, 0.0)
+
+
+# Full chase speed on this floor, before torchlight slows it.
+func run_speed() -> float:
+	return SPEED * speed_mul * minf(1.0 + 0.06 * game.depth, MAX_DEPTH_SPEED)
 
 
 func _face(dir: Vector3, delta: float) -> void:

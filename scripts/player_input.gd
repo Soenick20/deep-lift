@@ -14,6 +14,7 @@ var torch_pressed := false
 var swap := false
 var swap_pressed := false
 var _prev_swap := false
+var leave_held := false         # hold to drop out of the game (never player 1)
 
 var _prev_interact := false
 var _prev_torch := false
@@ -63,6 +64,7 @@ func poll() -> void:
 			i = _k(KEY_SLASH)
 			t = _k(KEY_M)
 			sw = _k(KEY_N)
+			leave_held = _k(KEY_BACKSPACE)
 		_:
 			var lx := Input.get_joy_axis(joy_id, JOY_AXIS_LEFT_X)
 			var ly := Input.get_joy_axis(joy_id, JOY_AXIS_LEFT_Y)
@@ -77,6 +79,7 @@ func poll() -> void:
 			i = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_A)
 			t = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_Y) or Input.is_joy_button_pressed(joy_id, JOY_BUTTON_LEFT_SHOULDER)
 			sw = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_B)
+			leave_held = Input.is_joy_button_pressed(joy_id, JOY_BUTTON_START)
 	if move.length() > 1.0:
 		move = move.normalized()
 	interact = i
@@ -88,11 +91,9 @@ func poll() -> void:
 	_prev_swap = sw
 
 
+# Joining takes a deliberate key, so player 1 can't add a second player by bumping an arrow key.
 static func kb2_join_pressed() -> bool:
-	for k in [KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_PERIOD, KEY_SLASH]:
-		if Input.is_physical_key_pressed(k):
-			return true
-	return false
+	return Input.is_physical_key_pressed(KEY_ENTER) or Input.is_physical_key_pressed(KEY_KP_ENTER)
 
 
 static func joy_join_pressed(id: int) -> bool:
